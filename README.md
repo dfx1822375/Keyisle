@@ -1,87 +1,107 @@
 # Keyisle
 
-密屿，一款轻量的 Windows 本地密码管理器。使用 Rust、Slint 与 SQLCipher，支持分类标签、拼音模糊搜索，以及浏览器和桌面软件中的快捷填充。
+**English** · [简体中文](README.zh-CN.md)
 
-当前为 **1.0.0 发布候选版**。源代码采用 MIT 许可证；Windows x64 用户无需安装 Rust、数据库或额外运行时。
+A lightweight, local password manager for Windows.
 
-![Keyisle 主界面](docs/preview.png)
+Keyisle (密屿) keeps your credentials in an encrypted local vault and brings them to the input you choose. Organize accounts with categories and tags, find them with fuzzy search, and fill them from a keyboard-driven popup. Built with Rust, Slint, and SQLCipher.
 
-## 安装与升级
+**[Download the latest release](https://github.com/dfx1822375/Keyisle/releases/latest)** · [Quick start](#quick-start) · [Keyboard shortcuts](#keyboard-shortcuts)
 
-推荐使用 `Keyisle-1.0.0-Setup-x64.exe`：这是带安装向导的安装包，支持选择安装位置、开始菜单入口、可选桌面快捷方式，以及 Windows 应用列表中的卸载入口。默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Keyisle`，无需管理员权限。
+![Keyisle account manager showing categories, tags, search, and account entries](docs/preview.png)
 
-升级时先从托盘退出旧版，再运行新安装包。已有账号、主密码、备份与偏好会保留。卸载也保留这些数据；如需清空，先在应用设置中使用“一键还原”。便携包中的 `Keyisle.exe` 可直接运行。
+Screenshots use synthetic accounts. The current application interface and the linked technical guides are in Simplified Chinese.
 
-旧版默认数据目录继续使用 `%LOCALAPPDATA%\PasswordHelper`，从旧版升级不需要手动搬动密码库。详情见 [安装与卸载](docs/installation.md)。
+## Install
 
-## 开始使用
+**[Open the latest downloads](https://github.com/dfx1822375/Keyisle/releases/latest)** and choose an asset:
 
-1. 设置至少 10 个字符的主密码并确认，创建空密码库；忘记主密码无法找回。
-2. 新增账号，填写名称、用户名、密码、分类和标签。网址与备注可选。
-3. 点击目标软件的输入框，按 `Ctrl+Alt+P` 呼出悬浮框，搜索并选择账号。
-4. 按下相应组合键填入。程序不会自动按 Enter 提交登录。
-
-| 操作 | 按键 |
+| Download | Choose this for |
 | --- | --- |
-| 呼出悬浮框 | Ctrl+Alt+P，可在设置中录制其他组合 |
-| 选择账号 | ↑ / ↓ |
-| 仅填密码 | Enter |
-| 仅填用户名 | Ctrl+Enter |
-| 用户名 → Tab → 密码 | Shift+Enter，从用户名框开始 |
-| 打开主界面 | Ctrl+Shift+M |
-| 关闭悬浮框 | Esc，即使焦点已在其他普通应用窗口 |
-| 主界面查看详情 | Alt+Enter |
-| 主界面编辑 | 双击账号或 F2 |
-| 账号菜单 | 右键或 Shift+F10 |
+| [Windows x64 installer](https://github.com/dfx1822375/Keyisle/releases/latest) — `Keyisle-<version>-Setup-x64.exe` | Recommended. Installation wizard, Start menu entry, optional desktop shortcut, and uninstaller. |
+| [Portable ZIP](https://github.com/dfx1822375/Keyisle/releases/latest) — `Keyisle-<version>-Windows-x64-portable.zip` | Extract the archive and run `Keyisle.exe`. |
+| [SHA256SUMS](https://github.com/dfx1822375/Keyisle/releases/latest) | Compare download hashes with PowerShell's `Get-FileHash -Algorithm SHA256`. |
 
-悬浮框顶部显示目标应用、窗口/页面标题和位置来源。选中账号不会自动填入，仍需明确触发填充。
+These links follow the latest published release. No Rust toolchain, database installation, or extra runtime is needed to use the Windows x64 app.
 
-## 搜索与账号查看
+The installer runs for the current user, without administrator privileges. Program files default to `%LOCALAPPDATA%\Programs\Keyisle`; vaults and preferences use `%LOCALAPPDATA%\PasswordHelper`. The portable app uses the same data location.
 
-支持名称、用户名、分类、标签的中文、全拼、拼音首字母、错拼与多词匹配，不搜索密码或备注。搜索命中会高亮。
+Before upgrading, save your work and exit Keyisle from the tray. Install over the existing version to keep accounts, backups, and preferences. Uninstalling also preserves your data. See the [installation and uninstall guide](docs/installation.md).
 
-悬浮框在空查询下优先显示此应用最近成功使用的账号；输入关键词后，匹配程度优先。失败或取消不更新最近使用。主界面继续按整体最近使用排序。应用识别用于排序，不作为授权依据；Chrome 的不同网站暂按同一个浏览器应用处理。
+The current installer is unsigned. Windows may show an unknown-publisher or download-reputation prompt.
 
-通过“查看详情”或账号菜单查看只读的用户名、分类、标签、网址、备注和默认隐藏的密码；HTTP/HTTPS 网址可交给默认浏览器打开。编辑仍使用独立入口。
+## Quick start
 
-## 敏感项与锁定
+1. Create a local vault with a master password of at least 10 characters. A forgotten master password cannot be recovered.
+2. Add an account with a name, username, and password. Categories, tags, a URL, and notes help you organize it.
+3. Click the destination input in your browser or desktop app, then press `Ctrl+Alt+P`.
+4. Search, choose an account with `↑` / `↓`, and press a fill shortcut below. Keyisle never presses Enter to submit the login.
 
-敏感项在查看、编辑、删除或填充前要求复验。默认 Windows 账户密码，可切换 PIN / Windows Hello 或密码库主密码；授权仅用于当次操作，不能跨操作复用。Windows 账户密码由系统凭据窗口收集，不写入密码库。
+## Find and fill from the keyboard
 
-默认电脑空闲 5 分钟锁库，设置中可调整时间和计时依据。Windows 锁屏、休眠及会话断开会立即锁库，取消尚未完成的授权和填充。重启后需要重新解锁。
+Search names, usernames, categories, and tags using Chinese text, full pinyin, pinyin initials, multiple terms, or typo-tolerant matching. Matches are highlighted; passwords and notes are excluded from search.
 
-## 界面与设置
+With an empty query, the popup favors accounts recently used successfully in the target application. With a query, relevance comes first. Failed or canceled fills do not change recent ordering.
 
-提供跟随系统、浅色、深色外观，以及青绿、经典蓝、柔和紫和石墨灰配色。外观、快捷键、锁定规则和启动偏好通过同一个“保存设置”提交。
+![Quick-fill popup matching the pinyin query youxiang to a Chinese email account](docs/screenshots/quick-fill.png)
 
-主窗口支持拖动、四边四角缩放，跨重启记住大小、位置和最大化状态。手动运行始终显示主界面；仅开机启动可按偏好留在托盘。
+The popup shows the destination application, window or page title, and position source. Selecting an entry does not fill it until you confirm. `Esc` dismisses the popup even when another ordinary application has focus; `Ctrl+Shift+M` opens the main window.
 
-## 备份与还原
+Application history is a sorting aid. Chrome websites currently share the browser's application history; this is not website identity verification.
 
-修改或删除账号前创建加密备份，也可手动导出、管理本地备份或从备份恢复独立工作副本。修改主密码会同步更新软件管理的本地备份，外部手动副本保留原密码。
+## Manage accounts and sensitive entries
 
-“一键还原”需要当前库主密码和明确确认，会删除软件管理的密码库、恢复副本、自动及升级前备份，清空偏好和开机启动登记，随后重新建库。外部手动导出与未知文件保留。验证失败不改文件；清除开始后无法撤销，文件占用等错误可继续或重启恢复。普通文件删除不等于安全擦除。
+Store categories, tags, URLs, and notes alongside each account. Use the context menu, double-click, or `F2` to edit. `Alt+Enter` opens read-only details with the password masked by default; viewing a sensitive entry does not authorize a later edit.
 
-详见 [存储说明](docs/storage.md)。
+Mark an entry as sensitive to require verification before viewing, editing, deleting, or filling it. Windows account password verification is the default; `Tab` switches to PIN / Windows Hello or the vault master password. Each approval is limited to the current action. Windows account passwords are collected by the system credentials dialog and are not stored in the vault.
 
-## 更新与公开发布
+| Account editor | Sensitive-entry verification |
+| --- | --- |
+| ![Account editor with masked password, categories, tags, URL, and notes](docs/screenshots/account-editor.png) | ![Sensitive-entry prompt offering Windows password, PIN or Hello, and vault master password](docs/screenshots/verification.png) |
 
-准备通过 GitHub Releases 提供安装包、便携包和校验清单。本候选版尚未连接发布仓库，自动更新未启用。
+## Appearance, locking, and backups
 
-计划采用定期检测与提示、用户确认后下载安装包、安装前锁库并退出、覆盖升级保留数据的方式。仓库创建后需固定更新来源、完成校验和实际升级测试，再启用该通道；不会把任意下载链接作为可信更新执行。见 [发布流程](docs/release.md)。
+Choose system, light, or dark appearance with teal, blue, violet, or graphite accents. Record a shortcut by pressing the keys you want, and save appearance, shortcut, lock, and startup preferences together. The main window supports dragging and resizing and remembers its layout across restarts.
 
-## 当前边界
+The default lock timeout is 5 minutes of computer inactivity. Both the timeout and idle basis are configurable. Windows session lock, sleep, and disconnection lock the vault and cancel pending consent or filling. Manual launch opens the main window; automatic startup can remain in the tray.
 
-- 填充采用 Unicode 模拟按键，不经过剪贴板；高权限软件、安全输入框和远程会话可能拒绝模拟输入。
-- 浏览器字段可能共用窗口句柄，程序不能证明网页域名和输入字段从未变化。切换页面或目标字段后请重新呼出。
-- 全局 Esc 作用于普通交互桌面；Windows 安全桌面受系统隔离。程序不记录其他按键内容。
-- 本软件尚未经过独立第三方安全审计。自动化回归不等同于安全审计，也不能防御已被控制的操作系统。
+| Settings | Encrypted backup manager |
+| --- | --- |
+| ![Settings for appearance, color, shortcut recording, and automatic locking](docs/screenshots/settings.png) | ![Backup manager with encrypted backup, restore, and deletion actions](docs/screenshots/backup-manager.png) |
 
-[验证记录](docs/validation.md) 区分自动通过项和人工未测项；[验收清单](docs/acceptance.md) 包含实际 aTrust、PIN、多显示器与 DPI 等检查。
+Keyisle creates encrypted backups before account edits or deletions. You can also export a backup or restore into a separate working copy. Changing the master password updates software-managed local backups; external exports keep their previous password.
 
-## 开发与构建
+Reset requires the current vault master password and confirmation. It removes software-managed vaults, backups, preferences, and startup registration. External exports and unknown files are retained. File deletion is not secure erasure. See [storage and backup behavior](docs/storage.md).
 
-主要开发环境为 WSL2，需要 Rust、LLVM（含 `llvm-rc`）、cargo-xwin 和 Python 3；安装器使用 NSIS。默认构建缓存位于 `E:\CodexBuild\windows-password-manager`，可通过 `PASSWORD_MANAGER_BUILD_ROOT` 调整。
+## Keyboard shortcuts
+
+| Action | Shortcut |
+| --- | --- |
+| Open quick-fill popup | `Ctrl+Alt+P`, configurable in Settings |
+| Choose an entry | `↑` / `↓` |
+| Fill password only | `Enter` |
+| Fill username only | `Ctrl+Enter` |
+| Fill username → Tab → password | `Shift+Enter`, starting from the username input |
+| Open main window from popup | `Ctrl+Shift+M` |
+| Dismiss popup | `Esc`, including while another ordinary app has focus |
+| View account details in main window | `Alt+Enter` |
+| Edit account | Double-click or `F2` |
+| Open account context menu | Right-click or `Shift+F10` |
+| Switch verification method | `Tab` / `Shift+Tab` |
+
+## Security and updates
+
+- The vault is encrypted locally with SQLCipher. Filling uses Unicode keyboard simulation and does not pass credentials through the clipboard.
+- Elevated apps, protected inputs, and remote sessions may reject simulated input. Browser fields can share window handles; Keyisle cannot prove a website or field has remained unchanged. Reopen the popup after changing the destination page or input.
+- Global Escape handling applies to the ordinary interactive desktop. Windows secure desktop remains isolated; Keyisle does not record other keystrokes.
+- Keyisle has not undergone an independent security audit. Automated tests cannot replace an audit or protect a compromised operating system.
+- In-app update checking and installation are not enabled yet. Use the [latest release page](https://github.com/dfx1822375/Keyisle/releases/latest) for updates.
+
+The [validation record](docs/validation.md) separates automated checks from untested manual scenarios, including real aTrust use, successful PIN verification, multiple monitors, and DPI changes. The [acceptance checklist](docs/acceptance.md) and [release process](docs/release.md) provide further details.
+
+## Build from source
+
+For development in WSL2, install Rust, LLVM including `llvm-rc`, cargo-xwin, and Python 3. Building the installer also requires NSIS. Build caches default to `E:\CodexBuild\windows-password-manager`; override with `PASSWORD_MANAGER_BUILD_ROOT`.
 
 ```bash
 bash scripts/test-core.sh
@@ -90,6 +110,8 @@ python3 scripts/generate-notices.py
 python3 scripts/build-installer.py
 ```
 
-图标源文件为 `assets/keyisle.svg`；`scripts/generate-icon.ps1` 生成 Windows 多尺寸 ICO 和安装向导侧栏。打包工具只收录白名单文件，并保留最近 3 个发布版本及对应诊断。
+The icon source is `assets/keyisle.svg`; `scripts/generate-icon.ps1` generates the Windows icon sizes and installer sidebar. Release packaging uses an explicit file whitelist and keeps the latest three local release versions and their diagnostics.
 
-Keyisle 自身采用 [MIT](LICENSE) 许可证；第三方依赖按各自许可证使用，通知见 `THIRD-PARTY-NOTICES.txt`。界面由 [Slint](https://slint.dev/) 驱动，应用“关于”页包含 Slint 署名。
+## License
+
+Keyisle is licensed under [MIT](LICENSE). Dependency notices are included in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt). The interface is powered by [Slint](https://slint.dev/), with attribution in the application's About page.

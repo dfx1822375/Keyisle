@@ -1,6 +1,8 @@
 # 安装、升级与卸载
 
-安装包仅面向 Windows x64。双击 `Keyisle-1.0.0-Setup-x64.exe` 后按向导选择目录和快捷方式；默认只安装到当前用户，不要求管理员权限。
+从[最新版下载页](https://github.com/dfx1822375/Keyisle/releases/latest)获取安装包、便携包和校验清单。该入口会自动跳转到最新公开版本。
+
+安装包仅面向 Windows x64。下载 `Keyisle-<版本>-Setup-x64.exe` 后双击，按向导选择目录和快捷方式；默认只安装到当前用户，不要求管理员权限。
 
 程序目录与密码库目录分开。默认程序目录为 `%LOCALAPPDATA%\Programs\Keyisle`，默认用户数据目录沿用 `%LOCALAPPDATA%\PasswordHelper`，所以旧版用户可直接升级。
 
@@ -20,6 +22,6 @@
 
 ## 校验与签名
 
-正式下载页将同时提供安装包、便携包和 `SHA256SUMS`。可用 PowerShell 的 `Get-FileHash` 比对对应文件的 SHA-256。校验清单用于检查文件完整性，不能替代发布者代码签名。
+下载页同时提供安装包、便携包和 `SHA256SUMS`。可用 PowerShell 的 `Get-FileHash` 比对对应文件的 SHA-256。校验清单用于检查文件完整性，不能替代发布者代码签名。
 
-本地候选安装包尚未附加受信任的 Authenticode 发布者签名。正式发布前应确认签名方案；未签名的安装包可能显示“未知发布者”或触发 Windows 下载信誉提示。
+当前安装包尚未附加受信任的 Authenticode 发布者签名，可能显示“未知发布者”或触发 Windows 下载信誉提示。
