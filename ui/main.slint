@@ -1,0 +1,877 @@
+import { LineEdit, ComboBox, ScrollView, TextEdit, CheckBox, Palette, AboutSlint } from "std-widgets.slint";
+
+import { Theme, Surface, Button, SecretField, BrandMark, WindowControl } from "components.slint";
+
+export enum FillAction { password, username, both }
+
+export struct EntryRow {
+    title: string,
+    username: string,
+    detail: string,
+    title-rich: styled-text,
+    user-rich: styled-text,
+    detail-rich: styled-text,
+    hint: string,
+    hint-rich: styled-text,
+}
+
+export struct BackupRow { title: string, detail: string }
+
+export component AppWindow inherits Window {
+    in property <bool> compact;
+    out property <string> match-color: Theme.match-color;
+    public function apply-appearance() { Theme.dark = root.effective-dark; Palette.color-scheme = root.effective-dark ? ColorScheme.dark : ColorScheme.light; }
+    init => { root.apply-appearance(); }
+    in-out property <int> appearance-mode;
+    in-out property <int> appearance-choice;
+    in-out property <bool> system-dark;
+    out property <bool> effective-dark: root.appearance-mode == 2 || (root.appearance-mode == 0 && root.system-dark);
+    changed effective-dark => { root.apply-appearance(); root.appearance-changed(); }
+    callback appearance-changed();
+    callback restore-layout();
+    title: compact ? "Keyisle · 快速填充" : "Keyisle · 账号管理";
+    no-frame: true;
+    icon: @image-url("../assets/keyisle.svg");
+    out property <length> window-radius: Theme.window-radius;
+    callback drag-window();
+    callback system-menu();
+    in-out property <int> theme-index;
+    in-out property <int> theme-choice;
+    changed theme-index => { Theme.scheme = root.theme-index; }
+    in-out property <string> success-status;
+    in-out property <int> status-serial;
+    out property <bool> status-success: root.status != "" && root.status == root.success-status;
+    in-out property <bool> app-menu-open;
+    private property <int> app-menu-index;
+    callback manage-context(int);
+    in-out property <length> desktop-width: 820px;
+    in-out property <length> desktop-height: 620px;
+    out property <length> desktop-min-width: 640px;
+    out property <length> desktop-min-height: 560px;
+    in-out property <bool> is-maximized;
+    callback minimize-window();
+    callback maximize-window();
+    callback update-frame();
+    always-on-top: compact;
+    callback resize-for-page();
+    out property <bool> fixed-page: compact || !root.unlocked || root.verification-active || root.reset-open || root.about-open;
+    out property <length> page-width: root.reset-open ? 600px : root.about-open ? 520px : compact ? 600px : !root.unlocked ? 480px : root.verification-active ? 600px : root.desktop-width;
+    preferred-width: root.page-width;
+    changed page-width => { root.resize-for-page(); }
+    // Keep a status slot so starting a fill never resizes or reactivates the popup.
+    out property <length> popup-height: root.verification-active ? 480px : !root.unlocked ? (root.new-vault ? 330px : 290px) : 196px + min(5, max(1, root.entries.length)) * 64px;
+    out property <length> page-height: root.reset-open ? 460px : root.about-open ? 460px : compact ? root.popup-height : !root.unlocked ? (root.new-vault ? 330px : 290px) : root.verification-active ? 480px : root.desktop-height;
+    preferred-height: root.page-height;
+    changed page-height => { root.resize-for-page(); }
+    min-width: root.reset-open ? 600px : root.about-open ? 520px : compact ? 600px : !root.unlocked ? 480px : root.verification-active ? 600px : root.desktop-min-width;
+    min-height: root.reset-open ? 460px : root.about-open ? 460px : compact ? root.popup-height : !root.unlocked ? (root.new-vault ? 330px : 290px) : root.verification-active ? 480px : root.desktop-min-height;
+    max-width: root.reset-open ? 600px : root.about-open ? 520px : compact ? 600px : !root.unlocked ? 480px : root.verification-active ? 600px : 32767px;
+    max-height: root.reset-open ? 460px : root.about-open ? 460px : compact ? root.popup-height : !root.unlocked ? (root.new-vault ? 330px : 290px) : root.verification-active ? 480px : 32767px;
+    background: Theme.canvas;
+    in-out property <bool> repaint-frame;
+    default-font-family: "Microsoft YaHei UI";
+    default-font-size: 14px;
+    in property <[EntryRow]> entries;
+    in-out property <int> selected: 0;
+    in-out property <string> query;
+    in-out property <string> category;
+    in-out property <string> tag;
+    in-out property <int> category-index;
+    in-out property <int> tag-index;
+    in-out property <string> shortcut-input;
+    in property <string> shortcut-label;
+    in-out property <bool> recording-shortcut;
+    in-out property <string> shortcut-before-record;
+    callback start-recording();
+    callback cancel-recording();
+    callback captured-shortcut(int,int);
+    in-out property <string> status;
+    in property <string> target-label;
+    in property <string> target-detail;
+    in property <bool> can-fill;
+    in property <bool> busy;
+    in property <bool> unlocked;
+    changed unlocked => { if (!root.unlocked) { root.maximized = false; root.context-open = false; root.app-menu-open = false; } }
+    in property <bool> new-vault;
+    in property <bool> working;
+    in property <bool> blocked;
+    out property <bool> ui-blocked: root.blocked || root.reset-open;
+    in property <string> policy-label;
+    in-out property <bool> edit-sensitive;
+    in-out property <bool> verification-active;
+    changed verification-active => { if (root.verification-active) { root.maximized = false; } }
+    in-out property <string> verification-label;
+    in-out property <string> verify-master;
+    in-out property <bool> reset-open;
+    in-out property <bool> reset-confirmed;
+    in-out property <bool> reset-incomplete;
+    in-out property <string> reset-master;
+    in-out property <string> reset-summary;
+    callback open-reset();
+    callback reset-profile();
+    callback close-reset();
+    in-out property <bool> settings-open;
+    in-out property <bool> start-at-logon;
+    in-out property <bool> start-in-tray;
+    in-out property <bool> context-open;
+    changed blocked => { if (root.blocked) { root.context-open = false; root.app-menu-open = false; } }
+    in-out property <bool> context-has-record;
+    in-out property <float> context-x;
+    in-out property <float> context-y;
+    in-out property <int> context-index;
+    callback request-context(float,float) -> bool;
+    callback context-action(int);
+    public function focus-context() { context-navigation.focus(); }
+    out property <float> list-left: results.absolute-position.x / 1px;
+    out property <float> list-top: results.absolute-position.y / 1px;
+    out property <float> list-width: results.visible-width / 1px;
+    out property <float> list-height: results.visible-height / 1px;
+    out property <float> list-scroll: results.content-y / 1px;
+    changed settings-open => { if (!root.settings-open) { root.cancel-recording(); } }
+    changed context-open => { if (root.context-open) { context-navigation.focus(); } }
+    public function scroll-selected() { results.content-y = -min(max(0, root.selected) * 64px, max(0px, results.content-height - results.visible-height)); }
+    in-out property <bool> backups-open;
+    in property <[BackupRow]> backup-rows;
+    in-out property <int> selected-backup: -1;
+    in-out property <int> backup-confirm-mode;
+    in-out property <string> backup-master;
+    callback open-backups();
+    callback close-backups();
+    callback refresh-backups();
+    callback delete-backup();
+    callback restore-backup();
+    changed selected-backup => {
+        root.backup-confirm-mode = 0; root.backup-master = ""; root.activity();
+        backups-view.content-y = -min(max(0, root.selected-backup) * 72px, max(0px, backups-view.content-height - backups-view.visible-height));
+    }
+    in-out property <bool> maintenance-open;
+    in-out property <bool> backups-confirm;
+    in property <int> backup-count;
+    in-out property <string> current-master;
+    in-out property <string> new-master;
+    in-out property <string> new-confirmation;
+    callback open-maintenance();
+    callback close-maintenance();
+    callback change-master();
+    callback clear-backups();
+    in-out property <int> timeout-index: 1;
+    in-out property <int> idle-source-index;
+    callback activity();
+    callback verify-password();
+    public function verify-selected() { if (root.verify-source == 0) { root.verify-windows(); } else if (root.verify-source == 1) { root.verify-hello(); } else { root.verify-password(); } }
+    callback verify-hello();
+    callback verify-windows();
+    in-out property <int> verify-source;
+    callback cancel-verification();
+    callback open-settings();
+    callback save-settings();
+    in property <string> vault-path;
+    in property <[string]> categories;
+    in property <[string]> tags;
+    in-out property <bool> editing;
+    in-out property <bool> edit-dirty;
+    in-out property <bool> edit-is-new;
+    in-out property <int> discard-action;
+    out property <bool> discard-open: root.discard-action != 0;
+    changed discard-open => { root.update-frame(); }
+    callback finish-discard(bool);
+    public function focus-discard() { root.discard-danger-focused = false; keep-editing.focus(); }
+    private property <bool> discard-danger-focused;
+
+    in-out property <bool> delete-confirm;
+    in-out property <string> master;
+    in-out property <string> confirmation;
+    in-out property <string> edit-title;
+    in-out property <string> edit-user;
+    in-out property <string> edit-password;
+    in-out property <string> edit-category;
+    in-out property <string> edit-tags;
+    in-out property <string> edit-url;
+    in-out property <string> edit-notes;
+    in-out property <bool> about-open;
+    in-out property <bool> about-from-settings;
+    in-out property <string> app-version;
+    callback open-about();
+    callback close-about();
+    callback open-slint-site();
+    in-out property <bool> details-open;
+    in-out property <string> details-title;
+    in-out property <string> details-user;
+    in-out property <string> details-password;
+    in-out property <string> details-category;
+    in-out property <string> details-tags;
+    in-out property <string> details-url;
+    in-out property <string> details-notes;
+    callback view-entry();
+    callback close-details();
+    callback open-entry-url();
+    callback unlock();
+    callback lock-vault();
+    callback session-changed();
+    callback new-entry();
+    callback edit-entry();
+    callback save-entry();
+    callback delete-entry();
+    callback cancel-edit();
+    callback backup();
+    callback restore();
+    callback native-open();
+    callback open-management();
+    callback search-changed();
+    private property <FillAction> next-action: FillAction.password;
+    callback fill(FillAction);
+    callback cancel();
+    callback exit-app();
+    public function focus-search() { if (root.reset-open) { if (root.working) { reset-navigation.focus(); } else if (root.reset-incomplete) { reset-continue.focus(); } else { reset-password.focus(); } } else if (root.verification-active) { if (root.verify-source == 2) { verification-input.focus(); } else { verification-navigation.focus(); } } else if (root.backups-open) { if (root.backup-confirm-mode != 0) { backup-password-input.focus(); } else { backup-navigation.focus(); } } else if (root.maintenance-open) { current-master-input.focus(); } else if (root.editing) { edit-name-input.focus(); } else if (root.settings-open) { appearance-input.focus(); } else if (root.about-open) { about-back.focus(); } else if (root.details-open) { details-back.focus(); } else if (root.unlocked) { search.focus(); } else { master-input.focus(); } }
+    forward-focus: keyboard;
+    changed selected => {
+        root.activity();
+
+    }
+
+    // A full-window dirty rectangle repairs lost software backing pixels after restore.
+    Rectangle { width: parent.width; height: parent.height; background: root.repaint-frame ? Theme.canvas : Theme.repaint-canvas; }
+    TouchArea {
+        x: 0px; y: 0px; width: parent.width; height: parent.height;
+        enabled: !root.compact && !root.discard-open;
+        pointer-event(event) => { if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) { root.drag-window(); } }
+        moved => { if (self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
+        double-clicked => { if (!root.fixed-page) { root.maximize-window(); } }
+    }
+    keyboard := FocusScope {
+        focus-on-click: false;
+        enabled: !root.discard-open;
+        key-pressed(event) => {
+            root.activity();
+            if (root.backups-open && !root.ui-blocked && root.backup-confirm-mode == 0 && root.backup-rows.length > 0) {
+                if (event.text == Key.DownArrow) { root.selected-backup = min(root.selected-backup + 1, root.backup-rows.length - 1); return accept; }
+                if (event.text == Key.UpArrow) { root.selected-backup = max(root.selected-backup - 1, 0); return accept; }
+            }
+            if (event.modifiers.alt && event.text == " " && !root.compact) { root.system-menu(); return accept; }
+            if (event.text == Key.Escape) { if (root.reset-open) { if (!root.working && !root.reset-incomplete) { root.close-reset(); } } else if (root.verification-active) { root.cancel-verification(); } else if (root.backups-open) { if (root.backup-confirm-mode != 0 && !root.working) { root.backup-confirm-mode = 0; root.backup-master = ""; } else { root.close-backups(); } } else if (root.maintenance-open) { root.close-maintenance(); } else if (root.settings-open) { root.settings-open = false; } else if (root.editing) { root.cancel-edit(); } else if (root.about-open) { root.close-about(); } else if (root.details-open) { root.close-details(); } else { root.cancel(); } return accept; }
+            return reject;
+        }
+        Surface {
+            x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
+            width: parent.width; height: parent.height;
+            visible: root.unlocked && !root.details-open && !root.editing && !root.verification-active && !root.settings-open && !root.maintenance-open && !root.backups-open;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            if root.compact: HorizontalLayout {
+                padding-right: 36px;
+                Text { text: "快速填充"; font-size: 15px; font-weight: 700; color: Theme.ink; }
+                Text { text: root.entries.length + " 个结果 · Esc 收起"; font-size: 12px; color: Theme.muted; horizontal-alignment: right; }
+            }
+            if root.compact: VerticalLayout { spacing: 2px;
+                Text { text: root.target-label; accessible-label: root.target-label; color: root.can-fill ? Theme.text : Theme.warning; overflow: elide; font-size: 12px; }
+                if root.target-detail != "": Text { text: root.target-detail; color: Theme.muted; overflow: elide; font-size: 11px; }
+            }
+            if !root.compact: HorizontalLayout {
+                spacing: 10px; padding-right: 116px;
+                BrandMark { width: 28px; height: 28px; }
+                Text { text: "Keyisle"; font-size: 20px; font-weight: 700; color: Theme.ink; vertical-alignment: center; horizontal-stretch: 0; }
+                Text { text: root.policy-label; color: Theme.muted; font-size: 11px; min-width: 0px; overflow: elide; vertical-alignment: center; }
+                Button { text: "新增账号"; width: 100px; primary: true; enabled: !root.delete-confirm && !root.ui-blocked; clicked => { root.new-entry(); } }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+            search := LineEdit {
+                height: 36px;
+                accessible-label: "搜索账号";
+                text <=> root.query;
+                placeholder-text: "搜索名称、标签、账号… 支持拼音／简拼／模糊匹配";
+                enabled: !root.busy && !root.ui-blocked;
+                key-pressed(event) => {
+                    if (event.text == Key.F2 && !root.compact && !root.ui-blocked && !root.delete-confirm) { root.edit-entry(); return accept; }
+                    if ((event.text == Key.F10 && event.modifiers.shift) || event.text == Key.Menu) {
+                        if (root.selected >= 0 && !root.ui-blocked) { root.scroll-selected(); root.request-context(root.list-left + 12, root.list-top + root.selected * 64 + root.list-scroll + 20); }
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.selected = min(root.selected + 1, root.entries.length - 1); root.scroll-selected();
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.selected = max(root.selected - 1, 0); root.scroll-selected();
+                        return accept;
+                    }
+                    if (event.text == Key.Return) {
+                        if (event.modifiers.alt && !root.compact) { root.view-entry(); return accept; }
+                        if (event.modifiers.alt || event.modifiers.meta) { return accept; }
+                        root.next-action = event.modifiers.control ? FillAction.username : event.modifiers.shift ? FillAction.both : FillAction.password;
+                    }
+                    return reject;
+                }
+                edited => { root.search-changed(); }
+                accepted => { if (root.can-fill && !root.busy && !root.ui-blocked) { root.fill(root.next-action); } }
+            }
+            }
+            if !root.compact: HorizontalLayout {
+                spacing: 12px;
+                ComboBox { height: Theme.control-height;
+                    model: root.categories;
+                    current-index <=> root.category-index;
+                    accessible-label: "分类筛选";
+                    enabled: !root.busy && !root.ui-blocked;
+                    selected(value) => { root.category = self.current-index == 0 ? "" : value; root.search-changed(); }
+                }
+                ComboBox { height: Theme.control-height;
+                    model: root.tags;
+                    current-index <=> root.tag-index;
+                    accessible-label: "标签筛选";
+                    enabled: !root.busy && !root.ui-blocked;
+                    selected(value) => { root.tag = self.current-index == 0 ? "" : value; root.search-changed(); }
+                }
+            }
+            if !root.compact: HorizontalLayout {
+                min-height: 26px;
+                Text { text: root.entries.length + " 个账号"; color: Theme.muted; }
+                Rectangle { horizontal-stretch: 1; }
+                if root.query != "" || root.category != "" || root.tag != "": Button { text: "清除筛选"; enabled: !root.busy && !root.ui-blocked; clicked => { root.query = ""; root.category = ""; root.tag = ""; root.search-changed(); root.focus-search(); } }
+            }
+            results := ScrollView {
+                vertical-stretch: 1;
+                min-height: 0px;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, root.entries.length * 64px);
+                TouchArea {
+                    width: results.visible-width; height: results.content-height;
+                    enabled: !root.busy && !root.ui-blocked;
+                    moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
+                    pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
+                VerticalLayout {
+                    y: 0px;
+                    width: parent.width;
+                    height: root.entries.length > 0 ? root.entries.length * 64px - (root.compact ? 8px : 4px) : 48px;
+                    spacing: root.compact ? 8px : 4px;
+                    for entry[index] in root.entries: Rectangle {
+                        height: root.compact ? 56px : 60px;
+                        border-radius: 10px;
+                        background: index == root.selected ? Theme.selection : row-touch.has-hover ? Theme.hover : Theme.surface;
+                        border-width: 1px;
+                        border-color: index == root.selected ? Theme.selection-line : Theme.line;
+                        accessible-role: button;
+                        accessible-label: (index == root.selected ? "已选择，" : "") + entry.title + "，" + entry.username + "，" + entry.detail;
+                        accessible-action-default => { root.selected = index; }
+                        if index == root.selected: Rectangle { x: 0px; y: 10px; width: 3px; height: parent.height - 20px; border-radius: 2px; background: Theme.brand; }
+                        VerticalLayout {
+                            padding: 6px;
+                            padding-left: 12px;
+                            spacing: 2px;
+                            StyledText { accessible-role: text; accessible-label: entry.title; text: entry.title-rich; default-color: Theme.ink; default-font-size: 14px; min-width: 0px; max-lines: 1; }
+                            StyledText { accessible-role: text; accessible-label: root.compact ? entry.hint : entry.username; text: root.compact ? entry.hint-rich : entry.user-rich; default-color: Theme.muted; default-font-size: 12px; min-width: 0px; max-lines: 1; }
+                            if !root.compact: StyledText { accessible-role: text; accessible-label: entry.detail; text: entry.detail-rich; default-color: Theme.muted; default-font-size: 11px; min-width: 0px; max-lines: 1; }
+                        }
+                        row-touch := TouchArea {
+                            enabled: !root.busy && !root.ui-blocked;
+                            mouse-cursor: pointer;
+                            clicked => { root.selected = index; root.focus-search(); }
+                            double-clicked => { if (!root.compact && !root.ui-blocked && !root.delete-confirm) { root.selected = index; root.edit-entry(); } }
+                            moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
+                            pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
+                        }
+                    }
+                    if root.entries.length == 0: Text {
+                        text: "没有匹配的账号，请调整关键词或筛选条件。";
+                        color: Theme.muted;
+                        wrap: word-wrap;
+                    }
+                }
+                }
+            }
+            if root.status != "": Text { text: root.status; color: root.status-success ? Theme.success : Theme.warning; wrap: word-wrap; font-size: root.compact ? 12px : 14px; }
+            if root.delete-confirm: HorizontalLayout {
+                spacing: 8px;
+                Button { danger: true; text: "确认删除"; enabled: !root.ui-blocked; clicked => { root.delete-entry(); } }
+                Button { text: "取消删除"; clicked => { root.delete-confirm = false; root.status = ""; root.focus-search(); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if !root.compact: HorizontalLayout {
+                spacing: 8px;
+                Button { subtle: true; text: "设置"; enabled: !root.ui-blocked; clicked => { root.open-settings(); } }
+                Button { subtle: true; text: "备份管理"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "查看详情"; enabled: root.selected >= 0 && !root.ui-blocked && !root.delete-confirm; clicked => { root.view-entry(); } }
+                Button { text: "锁定"; clicked => { root.lock-vault(); } }
+                more-button := Button { subtle: true; text: "更多"; enabled: !root.ui-blocked; clicked => { root.app-menu-index = 0; root.app-menu-open = !root.app-menu-open; if (root.app-menu-open) { app-menu.focus(); } } }
+            }
+            Text { text: root.compact ? "Enter 密码  ·  Ctrl+Enter 用户名  ·  Shift+Enter 连填  ·  Ctrl+Shift+M 管理" : root.shortcut-label + " 快速填充 · Alt+Enter 详情 · 双击编辑"; color: Theme.muted; font-size: root.compact ? 11px : 12px; }
+        }
+        }
+        Surface {
+            visible: !root.unlocked && !root.reset-open;
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            border-width: 0px; border-radius: 0px; background: Theme.canvas;
+            VerticalLayout {
+                padding: 20px; spacing: 8px;
+                if !root.compact: HorizontalLayout {
+                    spacing: 10px; alignment: start; padding-right: 80px;
+                    BrandMark { width: 38px; height: 38px; }
+                    Text { text: "Keyisle"; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                }
+                Text { text: root.new-vault ? "创建本地密码库" : "解锁密码库"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                Text { text: root.new-vault ? "设置至少 10 个字符的主密码，忘记后无法找回。" : "输入主密码后可搜索和填充账号。"; wrap: word-wrap; color: Theme.muted; }
+                master-input := SecretField {
+                    text <=> root.master; placeholder-text: "主密码";
+                    enabled: !root.working;
+                    accepted => { if (!root.new-vault && !root.working) { root.unlock(); } }
+                }
+                if root.new-vault: SecretField {
+                    text <=> root.confirmation; placeholder-text: "再次输入主密码";
+                    enabled: !root.working;
+                    accepted => { if (!root.working) { root.unlock(); } }
+                }
+                Button { text: root.working ? "正在处理…" : root.new-vault ? "创建密码库" : "解锁"; primary: true; horizontal-stretch: 1; enabled: !root.working; clicked => { root.unlock(); } }
+                if root.status != "": Text { text: root.status; wrap: word-wrap; color: root.status-success ? Theme.success : Theme.warning; }
+                HorizontalLayout {
+                    Button { text: "恢复备份"; enabled: !root.working; clicked => { root.restore(); } }
+                    Button { subtle: true; text: "收起"; clicked => { root.cancel(); } }
+                    if !root.compact: Button { subtle: true; text: "关于"; enabled: !root.working; clicked => { root.open-about(); } }
+                    if !root.compact: Button { subtle: true; text: "退出"; clicked => { root.exit-app(); } }
+                }
+            }
+        }
+        Surface {
+            x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
+            width: parent.width; height: parent.height;
+            visible: root.unlocked && root.editing && !root.verification-active && !root.settings-open && !root.maintenance-open && !root.backups-open;
+            accessible-role: groupbox; accessible-label: "账号编辑表单";
+            VerticalLayout {
+                padding: 16px; spacing: 8px;
+                Text { text: "账号信息"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                Text { text: root.edit-is-new ? "新增记录，保存后自动定位到此账号" : "修改账号信息，保存前可随时核对"; color: Theme.muted; font-size: 12px; }
+                CheckBox { enabled: !root.ui-blocked; text: "敏感项：使用、查看和编辑前再次验证"; checked <=> root.edit-sensitive; toggled => { root.edit-dirty = true; root.activity(); } }
+                ScrollView {
+                    vertical-stretch: 1; content-width: self.visible-width;
+                    VerticalLayout { spacing: 8px;
+                Text { text: "名称"; }
+                edit-name-input := LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-title; placeholder-text: "账号名称"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "用户名"; }
+                LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-user; placeholder-text: "用户名"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "密码"; }
+                SecretField { enabled: !root.ui-blocked; text <=> root.edit-password; placeholder-text: "账号密码"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "分类"; }
+                LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-category; placeholder-text: "例如：工作 / 内网"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "标签（逗号分隔）"; }
+                LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-tags; placeholder-text: "例如：客户端，VPN"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "网址"; }
+                LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-url; placeholder-text: "网址或服务器地址"; edited => { root.edit-dirty = true; root.activity(); } }
+                Text { text: "备注"; }
+                TextEdit { enabled: !root.ui-blocked; text <=> root.edit-notes; height: 85px; edited => { root.edit-dirty = true; root.activity(); } }
+                    }
+                }
+                if root.status != "": Text { text: root.status; color: root.status-success ? Theme.success : Theme.warning; wrap: word-wrap; }
+                HorizontalLayout { alignment: start;
+                    Button { text: "保存账号"; enabled: !root.ui-blocked; primary: true; clicked => { root.save-entry(); } }
+                    Button { subtle: true; text: "取消编辑"; clicked => { root.cancel-edit(); } }
+                }
+            }
+        }
+        Surface {
+            visible: root.unlocked && root.verification-active;
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            border-width: 0px; border-radius: 0px; background: Theme.canvas;
+            verification-navigation := FocusScope {
+            focus-on-click: false;
+            width: parent.width; height: parent.height;
+            capture-key-pressed(event) => {
+                if (event.text == Key.Tab && !root.working) {
+                    root.verify-master = "";
+                    root.verify-source = Math.mod(root.verify-source + (event.modifiers.shift ? 2 : 1), 3);
+                    root.focus-search(); return accept;
+                }
+                if (event.text == Key.Return && root.verify-source != 2 && !root.working) { root.verify-selected(); return accept; }
+                return reject;
+            }
+            VerticalLayout {
+                padding: 20px; spacing: root.compact ? 8px : 12px;
+                Text { text: "敏感项验证"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                Text { text: root.verification-label; overflow: elide; color: Theme.muted; }
+                Text { text: "只授权当前账号的本次操作，不延长其他敏感项的权限。"; font-size: 12px; wrap: word-wrap; color: Theme.muted; }
+                HorizontalLayout {
+                    Button { text: "Windows 密码"; subtle: true; selected: root.verify-source == 0; horizontal-stretch: 1; enabled: !root.working; clicked => { root.verify-source = 0; root.verify-master = ""; root.focus-search(); } }
+                    Button { text: "PIN / Hello"; subtle: true; selected: root.verify-source == 1; horizontal-stretch: 1; enabled: !root.working; clicked => { root.verify-source = 1; root.verify-master = ""; root.focus-search(); } }
+                    Button { text: "密码库主密码"; subtle: true; selected: root.verify-source == 2; horizontal-stretch: 1; enabled: !root.working; clicked => { root.verify-source = 2; root.focus-search(); } }
+                }
+                Text { text: "Tab 切换方式 · Shift+Tab 反向 · Enter 验证"; color: Theme.muted; font-size: 12px; }
+                Text { text: "当前方式：" + (root.verify-source == 0 ? "Windows 账户密码" : root.verify-source == 1 ? "Windows PIN / Hello" : "密码库主密码"); color: Theme.ink; }
+                verification-input := SecretField {
+                    visible: root.verify-source == 2;
+                    text <=> root.verify-master; placeholder-text: "密码库主密码";
+                    enabled: !root.working;
+                    edited => { root.activity(); }
+                    accepted => { if (!root.working) { root.verify-selected(); } }
+                }
+                HorizontalLayout {
+                    Button { text: root.verify-source == 0 ? "打开 Windows 验证" : root.verify-source == 1 ? "Windows PIN / Hello" : "验证主密码"; primary: true; horizontal-stretch: 1; enabled: !root.working; clicked => { root.verify-selected(); } }
+                }
+                if root.status != "": Text { text: root.status; font-size: root.compact ? 12px : 14px; wrap: word-wrap; color: Theme.warning; }
+                Rectangle { vertical-stretch: 1; }
+                HorizontalLayout {
+                    Button { subtle: true; text: "取消验证"; clicked => { root.cancel-verification(); } }
+                    Button { text: "锁定密码库"; clicked => { root.lock-vault(); } }
+                }
+            }
+        }
+        }
+        Surface {
+            x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
+            width: parent.width; height: parent.height;
+            visible: root.unlocked && root.settings-open && !root.verification-active && !root.maintenance-open && !root.backups-open;
+            VerticalLayout {
+                padding: 16px; spacing: 10px;
+                Text { text: "设置"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                Text { text: "快捷填充、安全规则与启动方式"; color: Theme.muted; font-size: 12px; }
+                ScrollView {
+                  vertical-stretch: 1; content-width: self.visible-width;
+                  VerticalLayout { spacing: 12px;
+                Text { text: "外观模式"; font-weight: 600; color: Theme.ink; }
+                appearance-input := ComboBox { height: Theme.control-height; model: ["跟随系统 · 默认", "浅色", "深色"]; accessible-label: "外观模式"; current-index <=> root.appearance-choice; enabled: !root.ui-blocked; selected(value) => { root.activity(); } }
+                Text { text: "外观配色"; font-weight: 600; color: Theme.ink; }
+                ComboBox { height: Theme.control-height; model: ["青绿 · 默认", "经典蓝", "柔和紫", "石墨灰"]; accessible-label: "外观配色"; current-index <=> root.theme-choice; enabled: !root.ui-blocked; selected(value) => { root.activity(); } }
+                Text { text: "保存后主界面与悬浮框同步切换，重新启动后保留。"; color: Theme.muted; wrap: word-wrap; }
+                Rectangle { height: 1px; background: Theme.line; }
+                Text { text: "密码库维护"; font-weight: 600; color: Theme.ink; }
+                HorizontalLayout {
+                    Button { text: "主密码与本地备份"; enabled: !root.ui-blocked; clicked => { root.open-maintenance(); } }
+                    Button { text: "本地备份列表"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
+                }
+                Rectangle { height: 1px; background: Theme.line; }
+                Text { text: "快捷填充"; font-weight: 600; color: Theme.ink; }
+                HorizontalLayout {
+                    LineEdit { height: Theme.control-height; text <=> root.shortcut-input; read-only: true; accessible-label: "呼出快捷键"; placeholder-text: "点击录制后按组合键"; enabled: !root.ui-blocked; }
+                    Button { text: root.recording-shortcut ? "取消录制" : "录制快捷键"; enabled: !root.ui-blocked; clicked => { if (root.recording-shortcut) { root.cancel-recording(); } else { root.start-recording(); } } }
+                }
+                Text { text: "直接按组合键，Esc 取消。已占用的组合可录入，保存时提示冲突。"; wrap: word-wrap; color: Theme.muted; }
+                Text { text: "自动锁定时间"; font-weight: 600; color: Theme.ink; }
+                ComboBox { height: Theme.control-height; model: ["1 分钟", "5 分钟", "15 分钟", "30 分钟", "60 分钟"]; accessible-label: "自动锁定时间"; enabled: !root.ui-blocked; current-index <=> root.timeout-index; selected(value) => { root.activity(); } }
+                Text { text: "空闲计时依据"; font-weight: 600; color: Theme.ink; }
+                ComboBox { height: Theme.control-height; model: ["电脑无键鼠操作", "密码库无操作"]; accessible-label: "空闲计时依据"; enabled: !root.ui-blocked; current-index <=> root.idle-source-index; selected(value) => { root.activity(); } }
+                Text { text: "电脑空闲：任何键鼠操作都会重新计时。\n密码库空闲：搜索、编辑、验证或填充等操作重新计时。\nWindows 锁屏、休眠和会话断开始终立即锁库。"; wrap: word-wrap; color: Theme.muted; }
+                Text { text: "启动方式"; font-weight: 600; color: Theme.ink; }
+                CheckBox { text: "开机启动（当前 Windows 用户）"; checked <=> root.start-at-logon; enabled: !root.ui-blocked; toggled => { root.activity(); } }
+                CheckBox { text: "开机启动时留在托盘"; checked <=> root.start-in-tray; enabled: !root.ui-blocked; toggled => { root.activity(); } }
+                Text { text: "手动打开始终显示主界面。开机启动可以留在托盘，密码库保持锁定。"; wrap: word-wrap; color: Theme.muted; }
+                Rectangle { height: 1px; background: Theme.line; }
+                Button { text: "关于 Keyisle"; enabled: !root.ui-blocked; clicked => { root.open-about(); } }
+                Text { text: "还原软件"; font-weight: 600; color: Theme.ink; }
+                Text { text: "验证当前主密码后，清除软件管理的账号、密码库、备份与设置。"; color: Theme.muted; wrap: word-wrap; }
+                Button { text: "一键还原"; danger: true; enabled: !root.ui-blocked; clicked => { root.open-reset(); } }
+
+                  }
+                }
+                if root.status != "": Text { text: root.status; color: root.status-success ? Theme.success : Theme.warning; wrap: word-wrap; }
+                HorizontalLayout { alignment: start;
+                    Button { text: "保存设置"; primary: true; enabled: !root.ui-blocked && !root.recording-shortcut; clicked => { root.save-settings(); } }
+                    Button { subtle: true; text: "返回账号列表"; enabled: !root.ui-blocked; clicked => { root.settings-open = false; root.activity(); } }
+                }
+            }
+        }
+        Surface {
+            x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
+            width: parent.width; height: parent.height;
+            visible: root.unlocked && root.maintenance-open && !root.verification-active && !root.backups-open;
+            accessible-role: groupbox; accessible-label: "主密码与本地备份表单";
+            VerticalLayout {
+                padding: 16px; spacing: 12px;
+                Text { text: "主密码与本地备份"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                Text { text: "管理主密码与这台电脑上的加密备份"; color: Theme.muted; font-size: 12px; }
+                ScrollView {
+                    vertical-stretch: 1;
+                    content-width: self.visible-width;
+                    VerticalLayout {
+                        spacing: 10px;
+                        HorizontalLayout {
+                            Text { text: "本地备份：" + root.backup-count + " 个"; font-weight: 600; color: Theme.ink; }
+                            Button { text: "查看本地备份列表"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
+                        }
+                        Text { text: "包含自动备份和升级前备份。手动导出、复制到其他位置的备份，以及恢复后保留的独立旧库不在处理范围内。"; wrap: word-wrap; color: Theme.muted; }
+                        Text { text: "当前主密码"; }
+                        current-master-input := SecretField { text <=> root.current-master; label: "当前主密码"; enabled: !root.ui-blocked; edited => { root.activity(); } }
+                        Text { text: "新主密码（至少 10 个字符）"; }
+                        SecretField { text <=> root.new-master; label: "新主密码"; enabled: !root.ui-blocked && !root.backups-confirm; edited => { root.activity(); } }
+                        Text { text: "确认新主密码"; }
+                        SecretField { text <=> root.new-confirmation; label: "确认新主密码"; enabled: !root.ui-blocked && !root.backups-confirm; edited => { root.activity(); } }
+                        Text { text: "修改时同步更新全部本地备份；完成后重新解锁。外部副本仍需原主密码。"; wrap: word-wrap; color: Theme.muted; }
+                        Button { text: "修改主密码并更新本地备份"; primary: true; enabled: !root.ui-blocked && !root.backups-confirm; clicked => { root.change-master(); } }
+                        Rectangle { height: 1px; background: Theme.line; }
+                        Text { text: root.backups-confirm ? "确认永久删除这 " + root.backup-count + " 个本地备份？此操作无法撤销，当前密码库会保留。需要验证上方的当前主密码。" : "清除后，下一次编辑或删除账号仍会按原规则生成自动备份。普通删除不保证清除磁盘上的旧数据痕迹。"; wrap: word-wrap; color: Theme.warning; }
+                        HorizontalLayout {
+                            Button { danger: true; text: root.backups-confirm ? "确认清除全部本地备份" : "清除全部本地备份"; enabled: !root.ui-blocked && root.backup-count > 0; clicked => { root.clear-backups(); } }
+                            if root.backups-confirm: Button { text: "取消清除"; clicked => { root.backups-confirm = false; root.status = ""; root.activity(); } }
+                        }
+                        if root.status != "": Text { text: root.status; wrap: word-wrap; color: root.status-success ? Theme.success : Theme.warning; }
+                    }
+                }
+                HorizontalLayout {
+                    Button { subtle: true; text: "返回设置"; enabled: !root.ui-blocked; clicked => { root.close-maintenance(); } }
+                    Button { text: "锁定密码库"; clicked => { root.lock-vault(); } }
+                }
+            }
+        }
+        Surface {
+            x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
+            width: parent.width; height: parent.height;
+            visible: root.unlocked && root.backups-open && !root.verification-active;
+            accessible-role: groupbox; accessible-label: "本地备份列表表单";
+            backup-navigation := FocusScope {
+            focus-on-click: false;
+            width: parent.width; height: parent.height;
+            VerticalLayout {
+                padding: 16px; spacing: 12px;
+                HorizontalLayout {
+                    padding-right: 116px;
+                    Text { text: "备份管理"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+                    Button { text: "刷新备份列表"; enabled: !root.ui-blocked; clicked => { root.refresh-backups(); } }
+                }
+                HorizontalLayout {
+                    Button { text: "加密备份"; enabled: !root.ui-blocked; clicked => { root.backup(); } }
+                    Button { text: "恢复备份"; enabled: !root.ui-blocked; clicked => { root.restore(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Text { text: "共 " + root.backup-rows.length + " 份 · 按原始备份时间倒序 · 时间为本机时区"; wrap: word-wrap; color: Theme.muted; }
+                Text { text: "仅显示软件管理的自动备份和升级前备份。恢复会切换到独立副本，原密码库和备份保留。"; wrap: word-wrap; color: Theme.muted; }
+                backups-view := ScrollView {
+                    vertical-stretch: 1; content-width: self.visible-width;
+                    VerticalLayout {
+                        spacing: 8px;
+                        for row[index] in root.backup-rows: Rectangle {
+                            height: 64px; border-radius: 8px; border-width: 1px;
+                            background: index == root.selected-backup ? Theme.selection : Theme.surface;
+                            border-color: index == root.selected-backup ? Theme.selection-line : Theme.line;
+                            accessible-role: button; accessible-label: (index == root.selected-backup ? "已选择，" : "") + row.title + "，" + row.detail;
+                            accessible-action-default => { if (!root.ui-blocked) { root.selected-backup = index; } }
+                            VerticalLayout { padding: 8px; spacing: 3px;
+                                Text { text: row.title; color: Theme.ink; font-weight: 600; }
+                                Text { text: row.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
+                            }
+                            TouchArea { enabled: !root.ui-blocked; clicked => { root.selected-backup = index; } }
+                        }
+                        if root.backup-rows.length == 0: Text { text: "暂无本地备份。编辑或删除账号时会自动创建备份。"; color: Theme.muted; wrap: word-wrap; }
+                    }
+                }
+                Text { text: root.backup-confirm-mode == 1 ? "确认永久删除选中的这一份备份？请输入当前密码库的主密码。删除无法撤销。" : root.backup-confirm-mode == 2 ? "请输入选中备份的主密码，再确认恢复。验证成功后切换到恢复副本。" : "选中一份备份后，可以删除或恢复。"; wrap: word-wrap; color: Theme.warning; }
+                backup-password-input := SecretField { visible: root.backup-confirm-mode != 0; text <=> root.backup-master; label: "备份操作验证密码"; enabled: !root.ui-blocked; edited => { root.activity(); } }
+                if root.status != "": Text { text: root.status; color: root.status-success ? Theme.success : Theme.warning; wrap: word-wrap; }
+                HorizontalLayout {
+                    Button { danger: true; text: root.backup-confirm-mode == 1 ? "确认删除此备份" : "删除选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 2; clicked => { root.delete-backup(); } }
+                    Button { text: root.backup-confirm-mode == 2 ? "确认恢复此备份" : "恢复选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 1; clicked => { root.restore-backup(); } }
+                    if root.backup-confirm-mode != 0: Button { text: "取消备份操作"; enabled: !root.ui-blocked; clicked => { root.backup-confirm-mode = 0; root.backup-master = ""; root.status = ""; root.activity(); } }
+                }
+                Button { subtle: true; text: root.settings-open ? "返回设置" : "返回账号列表"; clicked => { root.close-backups(); } }
+            }
+            }
+        }
+    }
+    Rectangle {
+        visible: root.reset-open;
+        width: parent.width; height: parent.height; background: Theme.canvas;
+        TouchArea {}
+        reset-navigation := FocusScope {
+        width: parent.width; height: parent.height;
+        capture-key-pressed(event) => {
+            if (event.text == Key.Escape) {if (!root.working && !root.reset-incomplete) {root.close-reset();}return accept;}
+            if (event.text == Key.Tab) {
+                if (root.working) {return accept;}
+                if (root.reset-incomplete) {reset-continue.focus();return accept;}
+                if (event.modifiers.shift && reset-password.input-focused) {if (reset-continue.enabled) {reset-continue.focus();} else {reset-cancel.focus();}return accept;}
+                if (!event.modifiers.shift && (reset-continue.focused || (reset-cancel.focused && !reset-continue.enabled))) {reset-password.focus();return accept;}
+            }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 10px;
+            Text { text: root.reset-incomplete ? "继续完成还原" : "一键还原"; font-size: 20px; font-weight: 700; color: Theme.ink; }
+            Text { text: root.reset-incomplete ? "还原已确认，但有文件尚未清除。关闭占用文件的程序后继续；重启也会继续完成。" : "永久清除账号、所有软件管理的密码库、自动备份、升级前备份和恢复副本，并将设置恢复默认。"; color: Theme.warning; wrap: word-wrap; }
+            Text { text: root.reset-summary; color: Theme.text; wrap: word-wrap; }
+            Text { text: "外部手动导出的备份保留。普通删除不保证清除磁盘上的旧数据痕迹。完成后软件重新启动，回到创建密码库页面。"; color: Theme.muted; wrap: word-wrap; }
+            reset-password := SecretField { visible: !root.reset-incomplete; text <=> root.reset-master; label: "还原验证主密码"; placeholder-text: "当前密码库主密码"; enabled: !root.working; }
+            if !root.reset-incomplete: CheckBox { text: "我确认永久清除上述数据并恢复默认设置"; checked <=> root.reset-confirmed; enabled: !root.working; }
+            if root.status != "": Text { text: root.status; wrap: word-wrap; color: Theme.warning; }
+            Rectangle { vertical-stretch: 1; }
+            HorizontalLayout {
+                reset-cancel := Button { text: "取消还原"; enabled: !root.working && !root.reset-incomplete; clicked => { root.close-reset(); } }
+                reset-continue := Button { text: root.working ? "正在还原…" : root.reset-incomplete ? "继续完成还原" : "验证主密码并还原"; primary: true; danger: true; enabled: !root.working && (root.reset-incomplete || (root.reset-confirmed && root.reset-master != "")); clicked => { root.reset-profile(); } }
+            }
+        }
+        }
+    }
+    if root.context-open: Rectangle {
+        width: parent.width; height: parent.height;
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    if (event.button == PointerEventButton.right) { root.request-context(self.mouse-x / 1px, self.mouse-y / 1px); }
+                    else { root.context-open = false; root.focus-search(); }
+                }
+            }
+        }
+    }
+    context-navigation := FocusScope {
+        visible: root.context-open;
+        x: min(max(0px, root.context-x * 1px), max(0px, root.width - self.width - 8px));
+        y: min(max(0px, root.context-y * 1px), max(0px, root.height - self.height - 8px));
+        width: 180px; height: root.context-has-record ? 136px : 40px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.context-open = false; root.focus-search(); return accept; }
+            if (event.text == Key.DownArrow || event.text == Key.Tab) { root.context-index = root.context-has-record ? Math.mod(root.context-index + 1,4) : 2; return accept; }
+            if (event.text == Key.UpArrow) { root.context-index = root.context-has-record ? Math.mod(root.context-index + 3,4) : 2; return accept; }
+            if (event.text == Key.Return) { root.context-action(root.context-index); return accept; }
+            return reject;
+        }
+        Rectangle {
+            background: Theme.surface; border-width: 1px; border-color: Theme.line; border-radius: 6px;
+            accessible-role: groupbox; accessible-label: "账号右键菜单";
+            VerticalLayout {
+                padding: 4px; spacing: 2px;
+                if root.context-has-record: Button { text: "编辑账号"; menu: true; selected: root.context-index == 0; entered => { root.context-index = 0; } clicked => { root.context-action(0); } }
+                if root.context-has-record: Button { text: "删除账号"; menu: true; danger: true; selected: root.context-index == 1; entered => { root.context-index = 1; } clicked => { root.context-action(1); } }
+                Button { text: "新增账号"; menu: true; selected: root.context-index == 2; entered => { root.context-index = 2; } clicked => { root.context-action(2); } }
+                if root.context-has-record: Button { text: "查看详情"; menu: true; selected: root.context-index == 3; entered => { root.context-index = 3; } clicked => { root.context-action(3); } }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.discard-open;
+        width: parent.width; height: parent.height; background: Theme.dark ? #00000088 : #18343155;
+        TouchArea {}
+        Surface {
+            x: (parent.width - self.width)/2; y: (parent.height - self.height)/2;
+            width: min(480px,parent.width - 48px); height: 210px;
+            accessible-role: groupbox; accessible-label: "未保存的修改";
+            FocusScope {
+                capture-key-pressed(event) => {
+                    if (event.text == Key.Escape) { root.finish-discard(false); return accept; }
+                    if (event.text == Key.Tab) { root.discard-danger-focused = !root.discard-danger-focused; if (root.discard-danger-focused) { discard-button.focus(); } else { keep-editing.focus(); } return accept; }
+                    return reject;
+                }
+                VerticalLayout {
+                    padding: 16px; spacing: 14px;
+                    Text { text: "保留当前修改？"; font-size: 22px; font-weight: 600; color: Theme.ink; }
+                    Text { text: "离开后，本次尚未保存的账号修改将被丢弃。"; wrap: word-wrap; color: Theme.muted; }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalLayout {
+                        keep-editing := Button { text: "继续编辑"; primary: true; clicked => { root.finish-discard(false); } }
+                        discard-button := Button { text: root.discard-action == 3 ? "放弃修改并退出" : root.discard-action == 2 ? "放弃修改并收起" : "放弃修改"; danger: true; clicked => { root.finish-discard(true); } }
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        visible: root.details-open && root.unlocked && !root.verification-active && !root.reset-open;
+        width: parent.width; height: parent.height; background: Theme.canvas;
+        accessible-role: groupbox; accessible-label: "账号详情";
+        VerticalLayout {
+            padding: 16px; spacing: 12px;
+            HorizontalLayout { padding-right: 116px; spacing: 8px;
+                Text { text: "账号详情"; font-size: 20px; font-weight: 700; color: Theme.ink; horizontal-stretch: 0; }
+                Text { text: "只读查看"; color: Theme.muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 0; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Text { text: root.details-title; font-size: 17px; font-weight: 600; color: Theme.ink; overflow: elide; }
+            ScrollView { vertical-stretch: 1; content-width: self.visible-width;
+                VerticalLayout { spacing: 8px; alignment: start;
+                    Text { text: "用户名"; color: Theme.muted; font-size: 12px; }
+                    LineEdit { height: Theme.control-height; text: root.details-user; read-only: true; accessible-label: "详情用户名"; }
+                    Text { text: "密码"; color: Theme.muted; font-size: 12px; }
+                    SecretField { text <=> root.details-password; read-only: true; label: "详情密码"; }
+                    HorizontalLayout { spacing: 12px;
+                        VerticalLayout { spacing: 6px; Text { text: "分类"; color: Theme.muted; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-category; read-only: true; accessible-label: "详情分类"; } }
+                        VerticalLayout { spacing: 6px; Text { text: "标签"; color: Theme.muted; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-tags; read-only: true; accessible-label: "详情标签"; } }
+                    }
+                    Text { text: "网址"; color: Theme.muted; font-size: 12px; }
+                    HorizontalLayout { spacing: 8px;
+                        LineEdit { height: Theme.control-height; text: root.details-url; read-only: true; accessible-label: "详情网址"; }
+                        Button { text: "打开网址"; enabled: root.details-url != "" && !root.ui-blocked; clicked => { root.open-entry-url(); } }
+                    }
+                    Text { text: "备注"; color: Theme.muted; font-size: 12px; }
+                    TextEdit { text: root.details-notes; read-only: true; height: 100px; accessible-label: "详情备注"; }
+                }
+            }
+            if root.status != "": Text { text: root.status; color: Theme.warning; wrap: word-wrap; }
+            HorizontalLayout { spacing: 8px; alignment: start;
+                Button { text: "编辑此账号"; primary: true; enabled: !root.ui-blocked; clicked => { root.edit-entry(); } }
+                details-back := Button { text: "返回账号列表"; enabled: !root.ui-blocked; clicked => { root.close-details(); } }
+            }
+        }
+    }
+    Rectangle {
+        visible: root.about-open;
+        width: parent.width; height: parent.height; background: Theme.canvas;
+        accessible-role: groupbox; accessible-label: "关于 Keyisle";
+        VerticalLayout {
+            padding: 20px; spacing: 10px;
+            HorizontalLayout { spacing: 12px; padding-right: 80px;
+                BrandMark { width: 44px; height: 44px; }
+                VerticalLayout { spacing: 3px;
+                    Text { text: "Keyisle"; font-size: 24px; font-weight: 700; color: Theme.ink; }
+                    Text { text: "版本 " + root.app-version; font-size: 12px; color: Theme.muted; }
+                }
+            }
+            Text { text: "密屿，一款轻量的本地密码管理器。"; color: Theme.text; wrap: word-wrap; }
+            Text { text: "密码库保存在本机，填充不经过剪贴板。"; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+            Rectangle { height: 1px; background: Theme.line; }
+            FocusScope {
+                height: 108px; vertical-stretch: 0;
+                accessible-role: button; accessible-label: "Slint 1.18.1，打开项目网站";
+                key-pressed(event) => { if (event.text == Key.Return || event.text == " ") { root.open-slint-site(); return accept; } return reject; }
+                Rectangle { background: transparent; border-radius: 8px; border-width: parent.has-focus ? 1px : 0px; border-color: Theme.brand; }
+                AboutSlint { width: parent.width; height: parent.height; }
+            }
+            Text { text: "更新服务将在首次 GitHub 公开发布时启用。"; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+            Rectangle { vertical-stretch: 1; }
+            about-back := Button { text: "返回"; clicked => { root.close-about(); } }
+        }
+    }
+    if root.compact: WindowControl {
+        kind: 2; x: parent.width - self.width - 8px; y: 12px;
+        accessible-label: "关闭悬浮框"; clicked => { root.cancel(); }
+    }
+    if !root.compact: HorizontalLayout {
+        x: parent.width - self.width - 8px; y: 16px; width: root.unlocked && !root.fixed-page ? 108px : 72px; height: 30px;
+        spacing: 0px;
+        WindowControl { kind: 0; accessible-label: "最小化窗口"; enabled: !root.discard-open; clicked => { root.minimize-window(); } }
+        if root.unlocked && !root.fixed-page: WindowControl { kind: 1; maximized: root.is-maximized; accessible-label: "最大化或还原窗口"; enabled: !root.discard-open; clicked => { root.maximize-window(); } }
+        WindowControl { kind: 2; accessible-label: "关闭窗口"; enabled: !root.working && !root.discard-open; clicked => { root.cancel(); } }
+    }
+    if root.app-menu-open: Rectangle {
+        width: parent.width; height: parent.height;
+        TouchArea { pointer-event(event) => { if (event.kind == PointerEventKind.down) { root.app-menu-open = false; root.focus-search(); } } }
+    }
+    app-menu := FocusScope {
+        visible: root.app-menu-open;
+        x: root.width - 196px; y: root.height - 192px; width: 180px; height: 108px;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.app-menu-open = false; root.focus-search(); return accept; }
+            if (event.text == Key.Tab || event.text == Key.DownArrow || event.text == Key.UpArrow) { root.app-menu-index = Math.mod(root.app-menu-index + (event.text == Key.UpArrow ? 2 : 1),3); return accept; }
+            if (event.text == Key.Return) { root.app-menu-open = false; if (root.app-menu-index == 0) { root.cancel(); } else if (root.app-menu-index == 1) { root.exit-app(); } else { root.open-about(); } return accept; }
+            return reject;
+        }
+        Surface {
+            border-radius: 6px;
+            VerticalLayout { padding: 4px; spacing: 2px;
+                Button { text: "收起到托盘"; menu: true; selected: root.app-menu-index == 0; entered => { root.app-menu-index = 0; } clicked => { root.app-menu-open = false; root.cancel(); } }
+                Button { text: "退出程序"; menu: true; selected: root.app-menu-index == 1; entered => { root.app-menu-index = 1; } clicked => { root.app-menu-open = false; root.exit-app(); } }
+                Button { text: "关于 Keyisle"; menu: true; selected: root.app-menu-index == 2; entered => { root.app-menu-index = 2; } clicked => { root.app-menu-open = false; root.open-about(); } }
+            }
+        }
+    }
+
+    Rectangle {
+        x: 0.5px; y: 0.5px; width: parent.width - 1px; height: parent.height - 1px;
+        background: transparent; border-width: 1px; border-color: Theme.window-line;
+        border-radius: root.is-maximized ? 0px : Theme.window-radius;
+        accessible-role: none;
+    }
+
+}

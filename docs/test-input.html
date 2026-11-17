@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>密码助手 · 本地填充测试</title>
+<style>body{font:18px system-ui;max-width:600px;margin:60px auto;padding:20px;background:#f4f6fa;color:#17233b}label{display:block;margin:24px 0}input{display:block;width:100%;box-sizing:border-box;padding:12px;margin-top:8px;font:inherit}p{line-height:1.7}</style>
+<h1>本地填充测试</h1><p>此页不联网、不提交表单、不保存内容。点击输入框，再按 Ctrl + Alt + P，选择假账号填入。</p>
+<label>用户名<input autocomplete="off" aria-label="用户名"></label>
+<label>密码<input type="password" autocomplete="off" aria-label="密码"></label>
+<label>可见文本（核对特殊字符）<input autocomplete="off" aria-label="可见文本"></label>
+<p id="combined-status" role="status" aria-live="polite">组合填充：未完成</p>
+<script>
+const fields = document.querySelectorAll('input');
+fields.forEach(field => field.addEventListener('input', () => {
+  document.getElementById('combined-status').textContent =
+    fields[0].value === 'demo.web@example.invalid' && fields[1].value === 'Demo-Web!2026'
+      ? '组合填充：通过' : '组合填充：未完成';
+}));
+</script>
+</html>

@@ -1,0 +1,9 @@
+[package]
+name = "password-manager-sqlcipher"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+links = "password_manager_sqlcipher"
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+sqlcipher-src = "=420.0.0"

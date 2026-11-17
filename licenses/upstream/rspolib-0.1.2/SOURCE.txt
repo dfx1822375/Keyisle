@@ -1,0 +1,2 @@
+Source: https://raw.githubusercontent.com/mondeja/rspolib/8170d99ebad29d894712ccb3dc6d0be2198d3055/LICENSE
+Package: rspolib 0.1.2

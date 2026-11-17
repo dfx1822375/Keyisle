@@ -1,0 +1,42 @@
+[package]
+name = "windows-password-manager"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+license = "MIT"
+description = "A lightweight local password manager for Windows"
+
+[dependencies]
+rusqlite = { version = "0.42", features = ["sqlcipher", "modern_sqlite"] }
+zeroize = "1.8"
+pinyin = { version = "=0.11.0", default-features = false, features = ["plain", "heteronym"] }
+
+[target.'cfg(not(windows))'.dependencies]
+rusqlite = { version = "0.42", features = ["bundled-sqlcipher"] }
+
+[target.'cfg(windows)'.dependencies]
+password-manager-sqlcipher = { path = "native-sqlcipher" }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-2", "raw-window-handle-06", "unstable-winit-030"] }
+windows-future = "=0.3.2"
+windows = { version = "=0.62.2", features = ["Security_Credentials_UI", "Win32_System_WinRT", "Win32_Foundation", "Win32_System_Com"] }
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Time", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Controls_Dialogs", "Win32_Storage_FileSystem", "Win32_System_RemoteDesktop", "Win32_System_SystemInformation"] }
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[workspace]
+members = ["native-sqlcipher"]
+default-members = ["."]
+resolver = "3"

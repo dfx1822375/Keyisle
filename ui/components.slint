@@ -1,0 +1,151 @@
+import { LineEdit } from "std-widgets.slint";
+
+export global Theme {
+    in-out property <int> scheme;
+    in-out property <bool> dark;
+    out property <color> canvas: dark ? #171d25 : #f7f9fb;
+    out property <color> repaint-canvas: dark ? #171d26 : #f7f9fa;
+    out property <length> window-radius: 10px;
+    out property <length> control-height: 36px;
+    out property <length> control-radius: 8px;
+    out property <color> surface: dark ? #202832 : #ffffff;
+    out property <color> window-line: dark ? #637182 : #9aa9b5;
+    out property <string> match-color: dark ? "#ffc17a" : "#a43d00";
+    out property <color> ink: dark ? #e7edf4 : scheme == 1 ? #172d4b : scheme == 2 ? #302342 : scheme == 3 ? #282e36 : #183431;
+    out property <color> text: dark ? #c4d0dc : #3d5359;
+    out property <color> muted: dark ? #a5b4c4 : #61747c;
+    out property <color> line: dark ? #465465 : #dce5e8;
+    out property <color> brand: dark ? (scheme == 1 ? #86b7ff : scheme == 2 ? #c7a5f3 : scheme == 3 ? #b7c5d6 : #78cfc0) : scheme == 1 ? #245db0 : scheme == 2 ? #7043a6 : scheme == 3 ? #455264 : #11675f;
+    out property <color> brand-hover: dark ? (scheme == 1 ? #aacdff : scheme == 2 ? #dcc5ff : scheme == 3 ? #d0dbe8 : #9ce2d5) : scheme == 1 ? #194885 : scheme == 2 ? #563180 : scheme == 3 ? #323d4b : #0c554e;
+    out property <color> on-brand: dark ? #14212b : #ffffff;
+    out property <color> selection: dark ? (scheme == 1 ? #293d58 : scheme == 2 ? #3c304e : scheme == 3 ? #35414f : #243e3e) : scheme == 1 ? #edf3fd : scheme == 2 ? #f3edfa : scheme == 3 ? #eef0f3 : #e8f3f0;
+    out property <color> selection-line: dark ? #8195ab : scheme == 1 ? #9bb8df : scheme == 2 ? #c1acd9 : scheme == 3 ? #b3bbc5 : #9bbfb6;
+    out property <color> hover: dark ? #303d4b : scheme == 1 ? #f3f6fc : scheme == 2 ? #f7f3fb : scheme == 3 ? #f4f5f7 : #f0f5f5;
+    out property <color> danger: dark ? #ffadb4 : #b33e43;
+    out property <color> danger-soft: dark ? #4a2c36 : #fbebed;
+    out property <color> on-danger: dark ? #35151c : #ffffff;
+    out property <color> success: dark ? #8dd9b2 : #236749;
+    out property <color> warning: dark ? #f4c58f : #7e5423;
+    out property <color> warning-soft: dark ? #453a29 : #fff5e6;
+}
+
+export component Surface inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.window-radius;
+    border-width: 1px;
+    border-color: Theme.line;
+    @children
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary;
+    in property <bool> danger;
+    in property <bool> subtle;
+    in property <bool> selected;
+    in property <bool> menu;
+    in property <bool> enabled: true;
+    in property <length> label-padding: 14px;
+    callback clicked();
+    callback entered();
+    out property <bool> focused: focus-scope.has-focus;
+    out property <bool> hovered: pointer.has-hover;
+    private property <bool> key-held;
+    forward-focus: focus-scope;
+    min-width: max(64px,label.preferred-width + 28px);
+    height: menu ? 30px : Theme.control-height;
+    horizontal-stretch: menu ? 1 : 0;
+    vertical-stretch: 0;
+    border-radius: menu ? 6px : Theme.control-radius;
+    border-width: 1px;
+    border-color: !enabled ? Theme.line : focus-scope.has-focus ? Theme.brand : primary ? (danger ? Theme.danger : Theme.brand) : subtle || menu ? transparent : Theme.line;
+    background: !enabled ? Theme.canvas : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected || pointer.has-hover ? (danger ? Theme.danger-soft : Theme.selection) : subtle || menu ? transparent : Theme.surface;
+    opacity: pointer.pressed && enabled ? 0.8 : 1;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    label := Text {
+        x: root.label-padding; width: parent.width - root.label-padding * 2; height: parent.height;
+        text: root.text;
+        font-size: 13px;
+        font-weight: root.primary || root.selected ? 600 : 400;
+        color: !root.enabled ? Theme.muted : root.primary ? (root.danger ? Theme.on-danger : Theme.on-brand) : root.danger ? Theme.danger : Theme.ink;
+        horizontal-alignment: root.menu ? left : center;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+    focus-scope := FocusScope {
+        width: parent.width; height: parent.height;
+        enabled: root.enabled;
+        changed has-focus => { if (!self.has-focus) { root.key-held = false; } }
+        key-pressed(event) => {
+            if (root.enabled && (event.text == Key.Return || event.text == " ")) { if (!root.key-held) { root.key-held = true; root.clicked(); } return accept; }
+            return reject;
+        }
+        key-released(event) => {
+            if (event.text == Key.Return || event.text == " ") { root.key-held = false; return accept; }
+            return reject;
+        }
+        pointer := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+            changed has-hover => { if (self.has-hover && root.enabled) { root.entered(); } }
+            clicked => { focus-scope.focus(); root.clicked(); }
+        }
+    }
+}
+
+export component SecretField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <string> label;
+    in property <bool> enabled: true;
+    in-out property <bool> revealed;
+    in property <bool> read-only;
+    out property <bool> input-focused: input.has-focus;
+    callback edited();
+    callback accepted();
+    forward-focus: input;
+    height: 36px;
+    vertical-stretch: 0;
+    changed text => { if (root.text == "") { root.revealed = false; } }
+    HorizontalLayout {
+        spacing: 6px;
+        input := LineEdit {
+            text <=> root.text;
+            read-only: root.read-only;
+            input-type: root.revealed ? InputType.text : InputType.password;
+            placeholder-text: root.placeholder-text;
+            accessible-label: root.label == "" ? root.placeholder-text : root.label;
+            enabled: root.enabled;
+            edited => { root.edited(); }
+            accepted => { root.accepted(); }
+        }
+        Button {
+            text: root.revealed ? "隐藏" : "显示";
+            accessible-label: (root.revealed ? "隐藏" : "显示") + (root.label == "" ? root.placeholder-text : root.label);
+            enabled: root.enabled;
+            subtle: true;
+            clicked => { root.revealed = !root.revealed; }
+        }
+    }
+}
+
+export component WindowControl inherits Button {
+    in property <int> kind;
+    in property <bool> maximized;
+    private property <color> icon-color: root.kind == 2 && root.hovered ? Theme.danger : Theme.text;
+    text: ""; subtle: true; danger: kind == 2;
+    width: 36px; height: 30px; label-padding: 0px;
+    Image {
+        x: 12px; y: 9px; width: 12px; height: 12px; colorize: root.icon-color;
+        source: root.kind == 0 ? @image-url("../assets/window/minimize.svg") : root.kind == 2 ? @image-url("../assets/window/close.svg") : root.maximized ? @image-url("../assets/window/restore.svg") : @image-url("../assets/window/maximize.svg");
+    }
+}
+
+export component BrandMark inherits Rectangle {
+    width: 38px; height: 38px; border-radius: 11px; background: Theme.brand;
+    Image { source: @image-url("../assets/keyisle-mark.svg"); colorize: Theme.on-brand; width: parent.width; height: parent.height; }
+}

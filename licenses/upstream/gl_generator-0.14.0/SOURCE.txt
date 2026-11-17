@@ -1,0 +1,2 @@
+Source: https://raw.githubusercontent.com/brendanzab/gl-rs/ea503e8d5fb6d73c6030e6191ce738cd3bf3433e/LICENSE
+Package: gl_generator 0.14.0
