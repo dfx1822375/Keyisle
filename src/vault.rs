@@ -24,6 +24,7 @@ pub struct Credential {
     pub sensitive: bool,
 }
 
+#[derive(Clone)]
 pub struct Summary {
     pub id: i64,
     pub title: String,
@@ -33,6 +34,55 @@ pub struct Summary {
     pub sensitive: bool,
     pub url: String,
     pub last_used: i64,
+}
+
+#[derive(Clone)]
+pub struct PreparedSummary {
+    title: crate::search::PreparedField,
+    username: crate::search::PreparedField,
+    tags: crate::search::PreparedField,
+    category: crate::search::PreparedField,
+    url: crate::search::PreparedField,
+    pub tag_list: Vec<String>,
+}
+
+impl PreparedSummary {
+    pub fn from_summary(summary: &Summary) -> Self {
+        let tag_list = summary
+            .tags
+            .split([',', '，', ';', '；'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Self {
+            title: crate::search::PreparedField::new(&summary.title),
+            username: crate::search::PreparedField::new(&summary.username),
+            tags: crate::search::PreparedField::new(&summary.tags),
+            category: crate::search::PreparedField::new(&summary.category),
+            url: crate::search::PreparedField::new(&summary.url),
+            tag_list,
+        }
+    }
+
+    pub fn rank(&self, summary: &Summary, query: &str, category: &str, tag: &str) -> Option<i32> {
+        if !category.is_empty() && summary.category != category {
+            return None;
+        }
+        if !tag.is_empty() && !self.tag_list.iter().any(|item| item == tag) {
+            return None;
+        }
+        crate::search::score_prepared(
+            query,
+            &[
+                (&self.title, 120),
+                (&self.username, 100),
+                (&self.tags, 110),
+                (&self.category, 80),
+                (&self.url, 60),
+            ],
+        )
+    }
 }
 
 impl Summary {
@@ -100,7 +150,7 @@ impl Vault {
             return Err("无法设置密码库密钥。".into());
         }
         db(conn.execute_batch(
-            "PRAGMA cipher_memory_security=ON; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON;",
+            "PRAGMA cipher_memory_security=ON; PRAGMA temp_store=MEMORY; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         ))?;
         db(conn.busy_timeout(Duration::from_secs(2)))?;
         // Reading schema authenticates the password before any persistent settings change.
@@ -226,13 +276,17 @@ impl Vault {
         old: &str,
         new: &str,
     ) -> Result<()> {
+        if new.is_empty() || new.len() > 4096 || new.contains('\0') {
+            return Err("新主密码为空、过长或含有空字符。".into());
+        }
+        let key_len = i32::try_from(new.len()).map_err(|_| "新主密码过长。")?;
         let mut original = Self::connect(source, old, false, false)?;
         original.backup(destination)?;
         drop(original);
         let copy = Self::connect(destination, old, false, false)?;
         // The codec API keeps both passphrases out of SQL text and preserves old schemas.
         let rc = unsafe {
-            rusqlite::ffi::sqlite3_rekey(copy.conn.handle(), new.as_ptr().cast(), new.len() as i32)
+            rusqlite::ffi::sqlite3_rekey(copy.conn.handle(), new.as_ptr().cast(), key_len)
         };
         if rc != rusqlite::ffi::SQLITE_OK {
             return Err("备份重新加密失败，原文件未被替换。".into());

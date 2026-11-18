@@ -1,4 +1,4 @@
-﻿param([string]$ExePath,[string]$DataDir)
+﻿param([string]$ExePath,[string]$DataDir,[switch]$TestClipboard)
 . (Join-Path $PSScriptRoot 'windows-test-helpers.ps1')
 Add-Type -AssemblyName System.Drawing
 Add-Type -ReferencedAssemblies 'System.Windows.Forms.dll' @'
@@ -10,6 +10,11 @@ public class KeyisleReceiver:Form {
 public static class KeyisleNative {
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+ [DllImport("user32.dll")] public static extern int CountClipboardFormats();
+ [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr h);
+ [DllImport("user32.dll")] public static extern bool CloseClipboard();
+ [DllImport("user32.dll")] public static extern bool IsClipboardFormatAvailable(uint format);
+ [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterClipboardFormat(string name);
 }
 '@
 [KeyisleNative]::SetProcessDpiAwarenessContext([IntPtr](-4))|Out-Null
@@ -42,10 +47,25 @@ $env:PASSWORD_MANAGER_DATA_DIR=$DataDir;$script:process=$null
 $form=[KeyisleReceiver]::new();$form.Text='Keyisle isolated receiver';$form.Width=450;$form.Height=180;$receiver=[Windows.Forms.TextBox]::new();$receiver.Width=390;$receiver.Top=30;$receiver.Left=20;$form.Controls.Add($receiver)
 trap{Write-Output $_.Exception.Message;Write-Output $_.ScriptStackTrace;try{Capture 'failure.png'}catch{};throw}
 try{
- StartApp;Button '关于';Assert (TextExists '关于 Keyisle') 'About page missing';Assert (TextExists '版本 1.0.0') 'About version missing';Capture '00-about.png';Button '返回';Unlock 'Cross-Backend-Test!2026';Capture '01-main.png'
+ $version=[Diagnostics.FileVersionInfo]::GetVersionInfo($ExePath).ProductVersion
+ StartApp;Button '关于';Assert (TextExists '关于 Keyisle') 'About page missing';Assert (TextExists "版本 $version") 'About version missing';Capture '00-about.png';Button '返回';Unlock 'Cross-Backend-Test!2026';Capture '01-main.png'
  SetEdit 0 'atrust';Button '编辑账号';SetEdit 5 'javascript:alert(1)';SetEdit 6 '只读详情，中文备注。';Button '保存账号'
  Button '查看详情';Assert (TextExists '账号详情') 'Details missing';Assert ((Value '详情用户名') -eq 'demo.atrust') 'Wrong detail account';Assert ((Value '详情备注') -eq '只读详情，中文备注。') 'Notes missing'
  Assert ((Named '详情密码').Current.IsPassword) 'Details password is unmasked by default'
+ if($TestClipboard -and [KeyisleNative]::CountClipboardFormats() -eq 0){
+  $password=Named '详情密码';$password.SetFocus();Pause 100
+  Key 0x11;Key 0x43;Key 0x43 $false;Key 0x11 $false;Pause 200
+  Assert ([KeyisleNative]::IsClipboardFormatAvailable(13)) 'Protected copy did not set Unicode text'
+  foreach($name in @('ExcludeClipboardContentFromMonitorProcessing','CanIncludeInClipboardHistory','CanUploadToCloudClipboard')){
+   Assert ([KeyisleNative]::IsClipboardFormatAvailable([KeyisleNative]::RegisterClipboardFormat($name))) "Clipboard protection missing: $name"
+  }
+  Assert ([KeyisleNative]::OpenClipboard([IntPtr]::Zero)) 'Could not hold test clipboard open'
+  try{SessionLock;Assert (TextExists '解锁密码库') 'Lock stalled while clipboard was busy'}finally{[KeyisleNative]::CloseClipboard()|Out-Null}
+  for($i=0;$i -lt 12 -and [KeyisleNative]::IsClipboardFormatAvailable(13);$i++){Pause 100}
+  Assert (-not [KeyisleNative]::IsClipboardFormatAvailable(13)) 'Protected copy remained after clipboard was released'
+  Unlock 'Cross-Backend-Test!2026';SetEdit 0 'atrust';Button '查看详情'
+  Write-Output 'PASS: keyboard copy sets history/cloud exclusions; session lock clears it after a competing clipboard holder releases it.'
+ }elseif($TestClipboard){Write-Output 'SKIP: test clipboard already contains user data.'}
  $user=Named '详情用户名';$user.SetFocus();[VaultTestNative]::SetForegroundWindow([IntPtr](Main).Current.NativeWindowHandle)|Out-Null;[Windows.Forms.SendKeys]::SendWait('^achanged');Pause 150
  Assert ((Value '详情用户名') -eq 'demo.atrust') 'Readonly details accepted edits'
  Button '打开网址';Assert (TextExists '只支持打开完整的 HTTP 或 HTTPS 网址，请编辑此账号检查网址。') 'Unsafe URL was not refused';Capture '02-details.png'

@@ -1,6 +1,54 @@
 use std::path::Path;
 use windows_password_manager::vault::{Credential, Vault};
 use zeroize::Zeroizing;
+
+struct DemoRecord {
+    title: &'static str,
+    username: &'static str,
+    password: &'static str,
+    category: &'static str,
+    tags: &'static [&'static str],
+}
+
+// Synthetic test fixtures used only by isolated verification scripts.
+const DEMO: [DemoRecord; 5] = [
+    DemoRecord {
+        title: "Chrome 示例网站",
+        username: "demo.web@example.invalid",
+        password: "Demo-Web!2026",
+        category: "工作 / 示例项目",
+        tags: &["网页", "测试"],
+    },
+    DemoRecord {
+        title: "aTrust 示例账号",
+        username: "demo.atrust",
+        password: "Demo-aTrust!2026",
+        category: "工作 / 示例项目",
+        tags: &["客户端", "测试"],
+    },
+    DemoRecord {
+        title: "数据库示例",
+        username: "demo.reader",
+        password: "Demo-DB#2026",
+        category: "工作 / 示例项目",
+        tags: &["数据库", "只读"],
+    },
+    DemoRecord {
+        title: "个人邮箱示例",
+        username: "demo.mail@example.invalid",
+        password: "Demo-Mail@2026",
+        category: "个人",
+        tags: &["网页", "邮箱"],
+    },
+    DemoRecord {
+        title: "特殊字符测试",
+        username: "demo.unicode",
+        password: "示例!@#€🔒",
+        category: "测试",
+        tags: &["测试", "特殊字符"],
+    },
+];
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let started = std::time::Instant::now();
@@ -39,7 +87,7 @@ fn run() -> Result<(), String> {
             }
             "--seed-demo" | "--seed-feedback" | "--seed-context-fixture" => {
                 let mut vault = Vault::create(path, master)?;
-                for record in windows_password_manager::DEMO {
+                for record in DEMO {
                     vault.save(&Credential {
                         title: record.title.into(),
                         username: record.username.into(),

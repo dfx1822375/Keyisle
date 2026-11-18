@@ -2,7 +2,11 @@ use std::{
     cell::{Cell, RefCell},
     mem::{size_of, zeroed},
     ptr::null_mut,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -12,12 +16,25 @@ use windows_sys::Win32::{
         ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
     },
     System::{
-        LibraryLoader::GetModuleHandleW,
+        DataExchange::{
+            CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+            RegisterClipboardFormatW, SetClipboardData,
+        },
+        Diagnostics::Debug::{
+            SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
+        },
+        LibraryLoader::{GetModuleHandleW, LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories},
+        Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
         RemoteDesktop::*,
         SystemInformation::GetTickCount,
         Threading::{AttachThreadInput, CreateMutexW, GetCurrentProcessId, GetCurrentThreadId},
     },
-    UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
+    UI::{
+        HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
+        Input::KeyboardAndMouse::*,
+        Shell::*,
+        WindowsAndMessaging::*,
+    },
 };
 use zeroize::Zeroize;
 
@@ -25,6 +42,134 @@ use windows_password_manager::shortcut::Shortcut;
 
 const POPUP_ESCAPE: u32 = WM_APP + 7;
 const WATCH_POPUP: u32 = WM_APP + 8;
+const SET_UNLOCKED: u32 = WM_APP + 9;
+static NATIVE_WINDOW: AtomicUsize = AtomicUsize::new(0);
+static MAX_HOVER_HWND: AtomicUsize = AtomicUsize::new(0);
+static MAX_HOVER_CALLBACK: Mutex<Option<Box<dyn Fn(usize, bool) + Send>>> = Mutex::new(None);
+
+pub fn harden_process() {
+    unsafe {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+}
+
+pub fn set_screen_protection(window: usize, enabled: bool) {
+    unsafe {
+        let affinity = if enabled {
+            WDA_EXCLUDEFROMCAPTURE
+        } else {
+            WDA_NONE
+        };
+        let window = window as HWND;
+        let mut current = WDA_NONE;
+        if GetWindowDisplayAffinity(window, &mut current) == 0 || current != affinity {
+            let _ = SetWindowDisplayAffinity(window, affinity);
+        }
+    }
+}
+
+pub fn set_max_hover_callback(callback: impl Fn(usize, bool) + Send + 'static) {
+    *MAX_HOVER_CALLBACK.lock().unwrap() = Some(Box::new(callback));
+}
+
+fn set_dword_clipboard(format: u32, value: u32) -> bool {
+    if format == 0 {
+        return false;
+    }
+    unsafe {
+        let memory = GlobalAlloc(GMEM_MOVEABLE, size_of::<u32>());
+        if memory.is_null() {
+            return false;
+        }
+        let ptr = GlobalLock(memory);
+        if ptr.is_null() {
+            let _ = GlobalFree(memory);
+            return false;
+        }
+        *ptr.cast::<u32>() = value;
+        let _ = GlobalUnlock(memory);
+        if SetClipboardData(format, memory).is_null() {
+            let _ = GlobalFree(memory);
+            return false;
+        }
+        true
+    }
+}
+
+/// Writes text to the clipboard excluded from Windows Clipboard History and cloud sync.
+pub fn copy_protected_text(owner: usize, text: &str) -> Result<u32, String> {
+    const CF_UNICODETEXT_ID: u32 = 13;
+    if text.is_empty() || text.len() > 65536 {
+        return Err("无可复制的有效内容。".into());
+    }
+    unsafe {
+        let mut opened = false;
+        for _ in 0..4 {
+            if OpenClipboard(owner as HWND) != 0 {
+                opened = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        if !opened {
+            return Err("剪贴板正被其他程序占用，请稍后重试。".into());
+        }
+        let result = (|| {
+            if EmptyClipboard() == 0 {
+                return Err("无法清空系统剪贴板。".into());
+            }
+            let exclude = RegisterClipboardFormatW(
+                wide("ExcludeClipboardContentFromMonitorProcessing").as_ptr(),
+            );
+            let history = RegisterClipboardFormatW(wide("CanIncludeInClipboardHistory").as_ptr());
+            let cloud = RegisterClipboardFormatW(wide("CanUploadToCloudClipboard").as_ptr());
+            if !set_dword_clipboard(exclude, 1)
+                || !set_dword_clipboard(history, 0)
+                || !set_dword_clipboard(cloud, 0)
+            {
+                return Err("无法阻止剪贴板历史或云同步，已取消复制。".into());
+            }
+            let mut units: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            let byte_len = units.len() * size_of::<u16>();
+            let memory = GlobalAlloc(GMEM_MOVEABLE, byte_len);
+            if memory.is_null() {
+                units.zeroize();
+                return Err("无法分配剪贴板内存。".into());
+            }
+            let ptr = GlobalLock(memory);
+            if ptr.is_null() {
+                units.zeroize();
+                let _ = GlobalFree(memory);
+                return Err("无法写入剪贴板内存。".into());
+            }
+            std::ptr::copy_nonoverlapping(units.as_ptr(), ptr.cast::<u16>(), units.len());
+            let _ = GlobalUnlock(memory);
+            units.zeroize();
+            if SetClipboardData(CF_UNICODETEXT_ID, memory).is_null() {
+                let _ = GlobalFree(memory);
+                return Err("写入系统剪贴板失败。".into());
+            }
+            Ok(GetClipboardSequenceNumber())
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
+pub fn clear_clipboard_if_matches(expected_sequence: u32) -> bool {
+    unsafe {
+        if expected_sequence == 0 || GetClipboardSequenceNumber() != expected_sequence {
+            return true;
+        }
+        if OpenClipboard(null_mut()) == 0 {
+            return false;
+        }
+        let cleared = GetClipboardSequenceNumber() != expected_sequence || EmptyClipboard() != 0;
+        let _ = CloseClipboard();
+        cleared
+    }
+}
 thread_local! {
     static ESCAPE_WINDOW: Cell<usize> = const { Cell::new(0) };
     static ESCAPE_POPUP: Cell<usize> = const { Cell::new(0) };
@@ -62,10 +207,13 @@ unsafe extern "system" fn popup_escape_hook(code: i32, wparam: WPARAM, lparam: L
 
 pub fn watch_popup(popup: Option<usize>) -> Result<(), String> {
     unsafe {
-        let window = FindWindowW(
-            wide("PasswordManagerPrototypeEvents").as_ptr(),
-            wide("PasswordManagerPrototypeEvents").as_ptr(),
-        );
+        let mut window = NATIVE_WINDOW.load(Ordering::SeqCst) as HWND;
+        if window.is_null() {
+            window = FindWindowW(
+                wide("PasswordManagerPrototypeEvents").as_ptr(),
+                wide("PasswordManagerPrototypeEvents").as_ptr(),
+            );
+        }
         if window.is_null() {
             return Err("全局 Esc 服务不可用。".into());
         }
@@ -459,9 +607,29 @@ pub fn present_popup(window: usize, target: Option<Target>) -> Result<(), String
         if GetMonitorInfoW(monitor, &mut info) == 0 || GetWindowRect(hwnd, &mut bounds) == 0 {
             return Err(failure("无法定位悬浮搜索框"));
         }
+        let mut monitor_dpi_x = 0u32;
+        let mut monitor_dpi_y = 0u32;
+        let window_dpi = GetDpiForWindow(hwnd);
+        let (popup_w, popup_h) = if window_dpi > 0
+            && GetDpiForMonitor(
+                monitor,
+                MDT_EFFECTIVE_DPI,
+                &mut monitor_dpi_x,
+                &mut monitor_dpi_y,
+            ) == 0
+            && monitor_dpi_x > 0
+        {
+            let ratio = monitor_dpi_x as f64 / window_dpi as f64;
+            (
+                ((bounds.right - bounds.left) as f64 * ratio).round() as i32,
+                ((bounds.bottom - bounds.top) as f64 * ratio).round() as i32,
+            )
+        } else {
+            (bounds.right - bounds.left, bounds.bottom - bounds.top)
+        };
         let work = info.rcWork;
-        let x = work.left + ((work.right - work.left - (bounds.right - bounds.left)) / 2).max(0);
-        let y = work.top + ((work.bottom - work.top - (bounds.bottom - bounds.top)) / 4).max(0);
+        let x = work.left + ((work.right - work.left - popup_w) / 2).max(0);
+        let y = work.top + ((work.bottom - work.top - popup_h) / 4).max(0);
         if SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -484,7 +652,7 @@ pub fn show_error(message: &str) {
         MessageBoxW(
             null_mut(),
             wide(message).as_ptr(),
-            wide("Keyisle · 原型").as_ptr(),
+            wide("Keyisle").as_ptr(),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -628,6 +796,16 @@ unsafe extern "system" fn window_proc(
                 ABORT_SHORTCUT => {
                     if let Some((_, id)) = context.staged.take() {
                         UnregisterHotKey(window, id);
+                    }
+                    return 0;
+                }
+                SET_UNLOCKED => {
+                    if wparam != 0 {
+                        context.idle_notified.set(false);
+                        SetTimer(window, IDLE_TIMER, 1000, None);
+                    } else {
+                        context.idle_notified.set(true);
+                        KillTimer(window, IDLE_TIMER);
                     }
                     return 0;
                 }
@@ -841,6 +1019,11 @@ impl Native {
             SendMessageW(self.window as HWND, RECORD_SHORTCUT, active as usize, 0);
         }
     }
+    pub fn set_unlocked(&self, unlocked: bool) {
+        unsafe {
+            PostMessageW(self.window as HWND, SET_UNLOCKED, unlocked as usize, 0);
+        }
+    }
     pub fn start(
         clock: Arc<windows_password_manager::security::LockClock>,
         root: std::path::PathBuf,
@@ -930,6 +1113,7 @@ impl Native {
                 CloseHandle(mutex);
                 return;
             }
+            NATIVE_WINDOW.store(window as usize, Ordering::SeqCst);
             let registered = RegisterHotKey(
                 window,
                 HOTKEY,
@@ -941,6 +1125,7 @@ impl Native {
             }
             if !tray(window, NIM_ADD) {
                 let _ = sender.send(Err(failure("无法创建托盘图标")));
+                NATIVE_WINDOW.store(0, Ordering::SeqCst);
                 UnregisterHotKey(window, context.hotkey_id.get());
                 DestroyWindow(window);
                 CloseHandle(mutex);
@@ -948,15 +1133,7 @@ impl Native {
             }
             if WTSRegisterSessionNotification(window, NOTIFY_FOR_THIS_SESSION) == 0 {
                 let _ = sender.send(Err(failure("无法注册系统锁屏通知")));
-                tray(window, NIM_DELETE);
-                UnregisterHotKey(window, context.hotkey_id.get());
-                DestroyWindow(window);
-                CloseHandle(mutex);
-                return;
-            }
-            if SetTimer(window, IDLE_TIMER, 1000, None) == 0 {
-                let _ = sender.send(Err(failure("无法创建空闲锁定计时器")));
-                WTSUnRegisterSessionNotification(window);
+                NATIVE_WINDOW.store(0, Ordering::SeqCst);
                 tray(window, NIM_DELETE);
                 UnregisterHotKey(window, context.hotkey_id.get());
                 DestroyWindow(window);
@@ -981,6 +1158,7 @@ impl Native {
                 UnhookWindowsHookEx(context.escape_hook.get());
             }
             ESCAPE_POPUP.with(|popup| popup.set(0));
+            NATIVE_WINDOW.store(0, Ordering::SeqCst);
             KillTimer(window, IDLE_TIMER);
             WTSUnRegisterSessionNotification(window);
             tray(window, NIM_DELETE);
@@ -1152,7 +1330,7 @@ pub fn finish_hello(
     };
     unsafe {
         RoInitialize(RO_INIT_MULTITHREADED).map_err(|_| "无法等待 Windows 验证，请改用主密码。")?;
-        let result = (|| {
+        let result: Result<(), String> = (|| {
             let started = Instant::now();
             while operation
                 .Status()
@@ -1298,12 +1476,45 @@ unsafe extern "system" fn frameless_proc(
                         {
                             return HTMAXBUTTON as LRESULT;
                         }
-                        if x < (200.0 * scale) as i32 && y < (56.0 * scale) as i32 {
+                        if x < width - (236.0 * scale) as i32 && y < (52.0 * scale) as i32 {
                             return HTCAPTION as LRESULT;
                         }
                     }
                 }
+                if MAX_HOVER_HWND.swap(0, Ordering::SeqCst) == window as usize {
+                    if let Some(cb) = MAX_HOVER_CALLBACK.lock().unwrap().as_ref() {
+                        cb(window as usize, false);
+                    }
+                }
                 return HTCLIENT as LRESULT;
+            }
+            if message == WM_NCMOUSEMOVE {
+                let on_max = frame != 0 && wparam == HTMAXBUTTON as usize;
+                let target = if on_max { window as usize } else { 0 };
+                let prev = MAX_HOVER_HWND.swap(target, Ordering::SeqCst);
+                if on_max && prev != window as usize {
+                    let mut track = TRACKMOUSEEVENT {
+                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_NONCLIENT | TME_LEAVE,
+                        hwndTrack: window,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut track);
+                    if let Some(cb) = MAX_HOVER_CALLBACK.lock().unwrap().as_ref() {
+                        cb(window as usize, true);
+                    }
+                } else if !on_max && prev == window as usize {
+                    if let Some(cb) = MAX_HOVER_CALLBACK.lock().unwrap().as_ref() {
+                        cb(window as usize, false);
+                    }
+                }
+            }
+            if message == 0x02A2 /* WM_NCMOUSELEAVE */ || message == WM_MOUSEMOVE {
+                if MAX_HOVER_HWND.swap(0, Ordering::SeqCst) == window as usize {
+                    if let Some(cb) = MAX_HOVER_CALLBACK.lock().unwrap().as_ref() {
+                        cb(window as usize, false);
+                    }
+                }
             }
             if frame != 0 && wparam == HTMAXBUTTON as usize {
                 if message == WM_NCLBUTTONDOWN {
@@ -1459,33 +1670,72 @@ pub fn system_dark() -> bool {
     }
 }
 
+pub fn window_position(window: usize) -> Option<(i32, i32)> {
+    unsafe {
+        let window = window as HWND;
+        if IsIconic(window) != 0 || IsZoomed(window) != 0 {
+            return None;
+        }
+        let mut bounds: RECT = zeroed();
+        if GetWindowRect(window, &mut bounds) == 0 {
+            return None;
+        }
+        Some((bounds.left, bounds.top))
+    }
+}
+
 pub fn window_layout(
     window: usize,
     scale: f64,
+    previous: Option<windows_password_manager::settings::WindowLayout>,
 ) -> Option<windows_password_manager::settings::WindowLayout> {
     unsafe {
         let window = window as HWND;
         if IsIconic(window) != 0 {
             return None;
         }
-        let mut place: WINDOWPLACEMENT = zeroed();
-        place.length = size_of::<WINDOWPLACEMENT>() as u32;
-        if GetWindowPlacement(window, &mut place) == 0 {
+        if IsZoomed(window) != 0 {
+            if let Some(prev) = previous {
+                return Some(windows_password_manager::settings::WindowLayout {
+                    maximized: true,
+                    ..prev
+                });
+            }
+            let mut place: WINDOWPLACEMENT = zeroed();
+            place.length = size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(window, &mut place) == 0 {
+                return None;
+            }
+            let bounds = place.rcNormalPosition;
+            let phys_w = (bounds.right - bounds.left).max(1);
+            let phys_h = (bounds.bottom - bounds.top).max(1);
+            return Some(windows_password_manager::settings::WindowLayout {
+                left: bounds.left,
+                top: bounds.top,
+                right: bounds.left + phys_w,
+                bottom: bounds.top + phys_h,
+                width: (phys_w as f64 / scale).round().clamp(640.0, 16384.0) as u32,
+                height: (phys_h as f64 / scale).round().clamp(560.0, 16384.0) as u32,
+                maximized: true,
+            });
+        }
+        let mut bounds: RECT = zeroed();
+        if GetWindowRect(window, &mut bounds) == 0 {
             return None;
         }
-        let bounds = place.rcNormalPosition;
+        let phys_w = bounds.right - bounds.left;
+        let phys_h = bounds.bottom - bounds.top;
+        if phys_w <= 0 || phys_h <= 0 {
+            return None;
+        }
         Some(windows_password_manager::settings::WindowLayout {
             left: bounds.left,
             top: bounds.top,
             right: bounds.right,
             bottom: bounds.bottom,
-            width: ((bounds.right - bounds.left) as f64 / scale)
-                .round()
-                .clamp(640.0, 16384.0) as u32,
-            height: ((bounds.bottom - bounds.top) as f64 / scale)
-                .round()
-                .clamp(560.0, 16384.0) as u32,
-            maximized: IsZoomed(window) != 0,
+            width: (phys_w as f64 / scale).round().clamp(640.0, 16384.0) as u32,
+            height: (phys_h as f64 / scale).round().clamp(560.0, 16384.0) as u32,
+            maximized: false,
         })
     }
 }
@@ -1494,35 +1744,47 @@ pub fn restore_window_layout(
     window: usize,
     layout: windows_password_manager::settings::WindowLayout,
     fixed: bool,
+    scale: f64,
 ) -> Result<(), String> {
     unsafe {
         let window = window as HWND;
-        let mut place: WINDOWPLACEMENT = zeroed();
-        place.length = size_of::<WINDOWPLACEMENT>() as u32;
-        if GetWindowPlacement(window, &mut place) == 0 {
-            return Err(failure("无法读取窗口布局"));
+        if IsIconic(window) != 0 || (IsZoomed(window) != 0 && (fixed || !layout.maximized)) {
+            ShowWindow(window, SW_RESTORE);
         }
-        let width = if fixed {
-            place.rcNormalPosition.right - place.rcNormalPosition.left
+        if fixed {
+            if SetWindowPos(
+                window,
+                null_mut(),
+                layout.left,
+                layout.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            ) == 0
+            {
+                return Err(failure("无法恢复窗口位置"));
+            }
+            fit_window_to_work_area(window as usize);
         } else {
-            layout.right - layout.left
-        };
-        let height = if fixed {
-            place.rcNormalPosition.bottom - place.rcNormalPosition.top
-        } else {
-            layout.bottom - layout.top
-        };
-        place.rcNormalPosition = RECT {
-            left: layout.left,
-            top: layout.top,
-            right: layout.left + width,
-            bottom: layout.top + height,
-        };
-        place.showCmd = SW_SHOWNORMAL as u32;
-        if SetWindowPlacement(window, &place) == 0 {
-            return Err(failure("无法恢复窗口布局"));
+            let width = (layout.width as f64 * scale).round().max(1.0) as i32;
+            let height = (layout.height as f64 * scale).round().max(1.0) as i32;
+            if SetWindowPos(
+                window,
+                null_mut(),
+                layout.left,
+                layout.top,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            ) == 0
+            {
+                return Err(failure("无法恢复窗口布局"));
+            }
+            fit_window_to_work_area(window as usize);
+            if layout.maximized {
+                ShowWindow(window, SW_MAXIMIZE);
+            }
         }
-        fit_window_to_work_area(window as usize);
         Ok(())
     }
 }

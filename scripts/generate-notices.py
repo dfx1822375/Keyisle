@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Collect upstream licence text from the locked local Windows dependency graph."""
+"""Collect upstream licence text from the active Windows dependency graph."""
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -11,24 +12,27 @@ environment = dict(os.environ, CARGO_HOME=str(BUILD / 'cargo'), CARGO_TARGET_DIR
 metadata = json.loads(subprocess.check_output([
     'cargo', 'metadata', '--offline', '--locked', '--format-version=1',
     '--filter-platform=x86_64-pc-windows-msvc'], cwd=PROJECT, env=environment))
+tree_output = subprocess.check_output([
+    'cargo', 'tree', '--offline', '--locked', '--target', 'x86_64-pc-windows-msvc',
+    '-e', 'normal,build', '--prefix', 'none', '--format', '{p}'], cwd=PROJECT, env=environment, text=True)
+active_nv = set()
+for line in tree_output.splitlines():
+    match = re.match(r'^([A-Za-z0-9_-]+)\s+v(\S+)', line.strip())
+    if match:
+        active_nv.add((match.group(1), match.group(2)))
+
 sections = [
     'KEYISLE — THIRD-PARTY NOTICES\n\nKeyisle source is licensed under MIT.\n\n' + (PROJECT / 'LICENSE').read_text(),
     'Slint is used under the Slint Royalty-free Desktop, Mobile, and Web Applications License 2.0. '
     'The application includes AboutSlint in its About page. Alternative upstream licence expressions '
-    'below do not change the licence of Keyisle. This inventory also includes build-time dependencies.']
+    'below do not change the licence of Keyisle. This inventory includes active target and build-time dependencies.']
 missing = []
 licence_texts = {}
-nodes = {item['id']: item for item in metadata['resolve']['nodes']}
-included = set()
-pending = list(metadata['workspace_default_members'])
-while pending:
-    identifier = pending.pop()
-    if identifier not in included:
-        included.add(identifier)
-        pending.extend(item['pkg'] for item in nodes[identifier]['deps'])
+collected_count = 0
 for package in sorted(metadata['packages'], key=lambda item: (item['name'], item['version'])):
-    if package['source'] is None or package['id'] not in included:
+    if package['source'] is None or (package['name'], package['version']) not in active_nv:
         continue
+    collected_count += 1
     root = Path(package['manifest_path']).parent
     candidates = [path for path in root.iterdir() if path.is_file() and
                   any(word in path.name.lower() for word in ['license', 'licence', 'copying', 'copyright', 'notice'])]
@@ -66,4 +70,4 @@ if missing:
 sections.extend(f'LICENCE TEXT {reference}\n\n{body}' for body, reference in licence_texts.items())
 output = PROJECT / 'THIRD-PARTY-NOTICES.txt'
 output.write_text('\n\n' + ('\n\n' + '=' * 72 + '\n\n').join(sections) + '\n')
-print(f'Collected notices for {len(metadata["packages"])} locked packages.')
+print(f'Collected notices for {collected_count} active locked packages.')

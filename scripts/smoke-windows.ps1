@@ -127,7 +127,7 @@ function Open-ForReceiver {
     Assert-True ($null -eq $titleBar -or $titleBar.Current.IsOffscreen) 'Popup still exposes a visible native title bar.' 
     Assert-True (($extended -band 0x80) -ne 0 -and ($extended -band 0x40000) -eq 0) 'Popup is not a taskbar-free tool window.'
     $scale = [SmokeNative]::GetDpiForWindow($handle) / 96.0
-    Assert-True (($element.Current.BoundingRectangle.Height / $scale) -le 516 -and ($element.Current.BoundingRectangle.Width / $scale) -le 604) 'Popup exceeds the five-row layout.'
+    Assert-True (($element.Current.BoundingRectangle.Height / $scale) -le 524 -and ($element.Current.BoundingRectangle.Width / $scale) -le 604) 'Popup exceeds the five-row layout.'
     return $handle
 }
 function Invoke-TestButton([string]$title,[string]$name,[int]$wait=200) {

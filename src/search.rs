@@ -25,19 +25,54 @@ struct Spelling {
 }
 impl Spelling {
     fn push(&mut self, syllable: &str, position: usize) {
+        let Some(first) = syllable.chars().next() else {
+            return;
+        };
         self.full.push_str(syllable);
-        self.initials.push(syllable.chars().next().unwrap());
+        self.initials.push(first);
         self.full_positions
             .extend(std::iter::repeat_n(position, syllable.chars().count()));
         self.initial_positions.push(position);
     }
 }
+
+/// Pre-computed search representation for a single public metadata field.
+#[derive(Clone, Default)]
+pub struct PreparedField {
+    field: String,
+    original: String,
+    variants: Vec<Spelling>,
+}
+
+impl PreparedField {
+    pub fn new(raw: &str) -> Self {
+        let field = normalized(raw);
+        let original = compact(&field);
+        let variants = if field.chars().any(|c| c.to_pinyin_multi().is_some()) {
+            pronunciations(&original)
+        } else {
+            Vec::new()
+        };
+        Self {
+            field,
+            original,
+            variants,
+        }
+    }
+}
+
 fn pronunciations(text: &str) -> Vec<Spelling> {
     let mut variants = vec![Spelling::default()];
     for (position, ch) in text.chars().enumerate() {
         let syllables: Vec<_> = ch
             .to_pinyin_multi()
-            .map(|p| p.into_iter().map(|v| normalized(v.plain())).collect())
+            .map(|p| {
+                p.into_iter()
+                    .map(|v| normalized(v.plain()))
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|list| !list.is_empty())
             .unwrap_or_else(|| vec![ch.to_string()]);
         if syllables.len() == 1 || variants.len() == 16 {
             for variant in &mut variants {
@@ -46,7 +81,7 @@ fn pronunciations(text: &str) -> Vec<Spelling> {
             continue;
         }
         let mut next = Vec::new();
-        // shortcut: bound polyphonic combinations to 16; add a phrase dictionary if real searches need more.
+        // Bound polyphonic combinations to 16 so worst-case expansion stays O(1).
         for syllable in &syllables {
             for variant in &variants {
                 if next.len() == 16 {
@@ -86,6 +121,53 @@ fn one_edit(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
+fn best_subsequence(text: &str, token: &str) -> Option<(i32, Vec<usize>)> {
+    let query: Vec<_> = token.chars().collect();
+    if query.is_empty() {
+        return None;
+    }
+    let chars: Vec<_> = text.chars().collect();
+    let max_gaps = query.len() * 3 + 4;
+    let mut best: Option<(i32, Vec<usize>)> = None;
+    let mut starts_tried = 0usize;
+    for start in 0..chars.len() {
+        if chars[start] != query[0] {
+            continue;
+        }
+        starts_tried += 1;
+        if starts_tried > 8 {
+            break;
+        }
+        let mut positions = Vec::with_capacity(query.len());
+        positions.push(start);
+        let mut matched = 1;
+        for (offset, &ch) in chars[start + 1..].iter().enumerate() {
+            if matched < query.len() && ch == query[matched] {
+                positions.push(start + 1 + offset);
+                matched += 1;
+                if matched == query.len() {
+                    break;
+                }
+            }
+        }
+        if matched < query.len() {
+            break;
+        }
+        let last = *positions.last().unwrap();
+        let gaps = last - start + 1 - query.len();
+        if gaps <= max_gaps {
+            let score = 600 - (gaps * 8 + start.min(40)) as i32;
+            if best
+                .as_ref()
+                .is_none_or(|(best_score, _)| score > *best_score)
+            {
+                best = Some((score, positions));
+            }
+        }
+    }
+    best
+}
+
 fn text_score(text: &str, token: &str) -> Option<i32> {
     if text == token {
         return Some(1000);
@@ -96,23 +178,8 @@ fn text_score(text: &str, token: &str) -> Option<i32> {
     if let Some(position) = text.find(token) {
         return Some(800 - position.min(80) as i32);
     }
-    let query: Vec<_> = token.chars().collect();
-    let mut matched = 0;
-    let mut first = 0;
-    for (position, ch) in text.chars().enumerate() {
-        if matched < query.len() && ch == query[matched] {
-            if matched == 0 {
-                first = position;
-            }
-            matched += 1;
-            if matched == query.len() {
-                let gaps = position - first + 1 - query.len();
-                if gaps <= query.len() * 3 + 4 {
-                    return Some(600 - (gaps * 8 + first.min(40)) as i32);
-                }
-                break;
-            }
-        }
+    if let Some((score, _)) = best_subsequence(text, token) {
+        return Some(score);
     }
     if token.is_ascii() && (4..=32).contains(&token.len()) {
         if text
@@ -133,30 +200,25 @@ fn query_tokens(query: &str) -> Option<Vec<String>> {
     }
     let tokens: Vec<_> = query
         .split_whitespace()
-        .map(compact)
+        .map(|part| compact(part))
         .filter(|s| !s.is_empty())
         .take(17)
         .collect();
     (tokens.len() <= 16).then_some(tokens)
 }
 
-pub fn score(query: &str, fields: &[(&str, i32)]) -> Option<i32> {
+pub fn score_prepared(query: &str, fields: &[(&PreparedField, i32)]) -> Option<i32> {
     let tokens = query_tokens(query)?;
     if tokens.is_empty() {
         return Some(0);
     }
     let mut best = vec![None; tokens.len()];
-    for (field, weight) in fields {
-        let field = normalized(field);
-        let original = compact(&field);
-        let variants = if field.chars().any(|c| c.to_pinyin_multi().is_some()) {
-            pronunciations(&original)
-        } else {
-            Vec::new()
-        };
+    for (prepared, weight) in fields {
         for (i, token) in tokens.iter().enumerate() {
-            let raw = text_score(&original, token).or_else(|| text_score(&field, token));
-            let pinyin = variants
+            let raw = text_score(&prepared.original, token)
+                .or_else(|| text_score(&prepared.field, token));
+            let pinyin = prepared
+                .variants
                 .iter()
                 .flat_map(|variant| {
                     [
@@ -175,26 +237,25 @@ pub fn score(query: &str, fields: &[(&str, i32)]) -> Option<i32> {
         .try_fold(0, |sum, n| n.map(|value| sum + value))
 }
 
+pub fn score(query: &str, fields: &[(&str, i32)]) -> Option<i32> {
+    let tokens = query_tokens(query)?;
+    if tokens.is_empty() {
+        return Some(0);
+    }
+    let prepared: Vec<(PreparedField, i32)> = fields
+        .iter()
+        .map(|(text, weight)| (PreparedField::new(text), *weight))
+        .collect();
+    let refs: Vec<(&PreparedField, i32)> = prepared.iter().map(|(p, w)| (p, *w)).collect();
+    score_prepared(query, &refs)
+}
+
 fn match_positions(text: &str, token: &str) -> Option<Vec<usize>> {
     if let Some(byte) = text.find(token) {
         let start = text[..byte].chars().count();
         return Some((start..start + token.chars().count()).collect());
     }
-    let mut wanted = token.chars().peekable();
-    let mut positions = Vec::new();
-    for (index, ch) in text.chars().enumerate() {
-        if wanted.peek() == Some(&ch) {
-            positions.push(index);
-            wanted.next();
-        }
-        if wanted.peek().is_none() {
-            break;
-        }
-    }
-    if wanted.peek().is_none()
-        && !positions.is_empty()
-        && positions.last().unwrap() - positions[0] + 1 - positions.len() <= positions.len() * 3 + 4
-    {
+    if let Some((_, positions)) = best_subsequence(text, token) {
         return Some(positions);
     }
     if token.is_ascii() && (4..=32).contains(&token.len()) {
@@ -332,13 +393,18 @@ mod tests {
         assert_eq!(highlights("unknown", "邮箱"), vec![("邮箱".into(), false)]);
     }
     #[test]
-    fn searches_chinese_pinyin_initials_width_typos_and_cross_fields() {
+    fn searches_chinese_pinyin_initials_width_typos_and_later_subsequences() {
         let fields = [("企业邮箱", 120), ("工作 VPN", 90), ("demo.user", 100)];
         for query in ["邮箱", "qiye youxiang", "qyyx", "yx", "ＶＰＮ", "demo VPN"] {
             assert!(score(query, &fields).is_some(), "{query}");
         }
         assert!(score("yinhang chongqing", &[("银行重庆", 120)]).is_some());
         assert!(score("atrsut", &[("aTrust", 120)]).is_some());
+        assert!(score("mpd", &[("my_very_long_prefix_mpd", 120)]).is_some());
+        assert_eq!(
+            highlights("mpd", "my_very_long_prefix_mpd"),
+            vec![("my_very_long_prefix_".into(), false), ("mpd".into(), true)]
+        );
         assert!(score("xyzq", &fields).is_none());
         assert!(score(&"a".repeat(129), &fields).is_none());
         assert!(score("yx", &[(&format!("{}邮箱", "工作".repeat(2000)), 120)]).is_some());

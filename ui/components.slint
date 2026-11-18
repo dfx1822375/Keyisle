@@ -3,30 +3,37 @@ import { LineEdit } from "std-widgets.slint";
 export global Theme {
     in-out property <int> scheme;
     in-out property <bool> dark;
-    out property <color> canvas: dark ? #171d25 : #f7f9fb;
-    out property <color> repaint-canvas: dark ? #171d26 : #f7f9fa;
+    out property <color> canvas: dark ? #151b23 : #f5f8fa;
+    out property <color> repaint-canvas: dark ? #151b24 : #f5f8f9;
     out property <length> window-radius: 10px;
     out property <length> control-height: 36px;
     out property <length> control-radius: 8px;
-    out property <color> surface: dark ? #202832 : #ffffff;
-    out property <color> window-line: dark ? #637182 : #9aa9b5;
+    out property <color> surface: dark ? #1f2732 : #ffffff;
+    out property <color> surface-muted: dark ? #19202a : #edf2f6;
+    out property <color> window-line: dark ? #5b697a : #9aa9b5;
     out property <string> match-color: dark ? "#ffc17a" : "#a43d00";
-    out property <color> ink: dark ? #e7edf4 : scheme == 1 ? #172d4b : scheme == 2 ? #302342 : scheme == 3 ? #282e36 : #183431;
-    out property <color> text: dark ? #c4d0dc : #3d5359;
-    out property <color> muted: dark ? #a5b4c4 : #61747c;
-    out property <color> line: dark ? #465465 : #dce5e8;
+    out property <color> ink: dark ? #eaf0f6 : scheme == 1 ? #172d4b : scheme == 2 ? #302342 : scheme == 3 ? #282e36 : #183431;
+    out property <color> text: dark ? #c6d2de : #3a5057;
+    out property <color> muted: dark ? #97a8ba : #61747c;
+    out property <color> line: dark ? #384657 : #d8e2e7;
+    out property <color> line-subtle: dark ? #2c3846 : #e4ecef;
     out property <color> brand: dark ? (scheme == 1 ? #86b7ff : scheme == 2 ? #c7a5f3 : scheme == 3 ? #b7c5d6 : #78cfc0) : scheme == 1 ? #245db0 : scheme == 2 ? #7043a6 : scheme == 3 ? #455264 : #11675f;
     out property <color> brand-hover: dark ? (scheme == 1 ? #aacdff : scheme == 2 ? #dcc5ff : scheme == 3 ? #d0dbe8 : #9ce2d5) : scheme == 1 ? #194885 : scheme == 2 ? #563180 : scheme == 3 ? #323d4b : #0c554e;
-    out property <color> on-brand: dark ? #14212b : #ffffff;
+    out property <color> on-brand: dark ? #121e28 : #ffffff;
     out property <color> selection: dark ? (scheme == 1 ? #293d58 : scheme == 2 ? #3c304e : scheme == 3 ? #35414f : #243e3e) : scheme == 1 ? #edf3fd : scheme == 2 ? #f3edfa : scheme == 3 ? #eef0f3 : #e8f3f0;
-    out property <color> selection-line: dark ? #8195ab : scheme == 1 ? #9bb8df : scheme == 2 ? #c1acd9 : scheme == 3 ? #b3bbc5 : #9bbfb6;
-    out property <color> hover: dark ? #303d4b : scheme == 1 ? #f3f6fc : scheme == 2 ? #f7f3fb : scheme == 3 ? #f4f5f7 : #f0f5f5;
+    out property <color> selection-line: dark ? #7d92a8 : scheme == 1 ? #9bb8df : scheme == 2 ? #c1acd9 : scheme == 3 ? #b3bbc5 : #9bbfb6;
+    out property <color> hover: dark ? #2b3746 : scheme == 1 ? #f1f5fc : scheme == 2 ? #f6f1fb : scheme == 3 ? #f2f4f7 : #eef5f4;
     out property <color> danger: dark ? #ffadb4 : #b33e43;
     out property <color> danger-soft: dark ? #4a2c36 : #fbebed;
+    out property <color> danger-line: dark ? #6f3d4b : #efb9bf;
     out property <color> on-danger: dark ? #35151c : #ffffff;
-    out property <color> success: dark ? #8dd9b2 : #236749;
+    out property <color> close-hover: dark ? #c93838 : #d43528;
+    out property <color> success: dark ? #8dd9b2 : #216648;
+    out property <color> success-soft: dark ? #1d352b : #eaf6f0;
+    out property <color> success-line: dark ? #2f5b47 : #b7dfcb;
     out property <color> warning: dark ? #f4c58f : #7e5423;
-    out property <color> warning-soft: dark ? #453a29 : #fff5e6;
+    out property <color> warning-soft: dark ? #3f3525 : #fff6e8;
+    out property <color> warning-line: dark ? #655235 : #edd5ad;
 }
 
 export component Surface inherits Rectangle {
@@ -37,8 +44,69 @@ export component Surface inherits Rectangle {
     @children
 }
 
+export component SectionCard inherits Rectangle {
+    background: Theme.surface;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Theme.line-subtle;
+    @children
+}
+
+export component SensitiveBadge inherits Rectangle {
+    width: 46px;
+    height: 19px;
+    border-radius: 5px;
+    background: Theme.danger-soft;
+    border-width: 1px;
+    border-color: Theme.danger-line;
+    accessible-role: none;
+    HorizontalLayout {
+        padding-left: 5px;
+        padding-right: 5px;
+        spacing: 3px;
+        alignment: center;
+        Image {
+            width: 11px;
+            height: 11px;
+            y: (parent.height - self.height) / 2;
+            source: @image-url("../assets/icons/shield.svg");
+            colorize: Theme.danger;
+        }
+        Text {
+            text: "敏感";
+            font-size: 10.5px;
+            font-weight: 600;
+            color: Theme.danger;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+}
+
+export component StatusBanner inherits Rectangle {
+    in property <string> text;
+    in property <bool> success;
+    in property <bool> compact;
+    height: max(root.compact ? 30px : 34px, message.preferred-height + (root.compact ? 12px : 16px));
+    vertical-stretch: 0;
+    border-radius: 8px;
+    border-width: 1px;
+    background: root.success ? Theme.success-soft : Theme.warning-soft;
+    border-color: root.success ? Theme.success-line : Theme.warning-line;
+    message := Text {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: parent.width - 24px;
+        text: root.text;
+        wrap: word-wrap;
+        font-size: root.compact ? 12px : 13px;
+        color: root.success ? Theme.success : Theme.warning;
+    }
+}
+
 export component Button inherits Rectangle {
     in property <string> text;
+    in property <image> icon;
     in property <bool> primary;
     in property <bool> danger;
     in property <bool> subtle;
@@ -51,30 +119,45 @@ export component Button inherits Rectangle {
     out property <bool> focused: focus-scope.has-focus;
     out property <bool> hovered: pointer.has-hover;
     private property <bool> key-held;
+    private property <bool> has-icon: root.icon.width > 0 && !root.menu;
+    private property <color> fg: !root.enabled ? Theme.muted : root.primary ? (root.danger ? Theme.on-danger : Theme.on-brand) : root.danger ? Theme.danger : Theme.ink;
     forward-focus: focus-scope;
-    min-width: max(64px,label.preferred-width + 28px);
+    min-width: root.text == "" ? 36px : max(64px, label.preferred-width + (root.has-icon ? 20px : 0px) + root.label-padding * 2);
     height: menu ? 30px : Theme.control-height;
     horizontal-stretch: menu ? 1 : 0;
     vertical-stretch: 0;
     border-radius: menu ? 6px : Theme.control-radius;
-    border-width: 1px;
-    border-color: !enabled ? Theme.line : focus-scope.has-focus ? Theme.brand : primary ? (danger ? Theme.danger : Theme.brand) : subtle || menu ? transparent : Theme.line;
-    background: !enabled ? Theme.canvas : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected || pointer.has-hover ? (danger ? Theme.danger-soft : Theme.selection) : subtle || menu ? transparent : Theme.surface;
-    opacity: pointer.pressed && enabled ? 0.8 : 1;
+    border-width: focus-scope.has-focus && enabled ? 1.5px : 1px;
+    border-color: !enabled ? Theme.line-subtle : focus-scope.has-focus ? (danger ? Theme.danger : Theme.brand) : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected ? (danger ? Theme.danger-line : Theme.selection-line) : pointer.has-hover ? (danger ? Theme.danger-line : subtle || menu ? transparent : Theme.selection-line) : subtle || menu ? transparent : danger ? Theme.danger-line : Theme.line;
+    background: !enabled ? Theme.surface-muted : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected || pointer.has-hover ? (danger ? Theme.danger-soft : subtle && !selected ? Theme.hover : Theme.selection) : subtle || menu ? transparent : Theme.surface;
+    opacity: pointer.pressed && enabled ? 0.85 : 1;
     accessible-role: button;
     accessible-label: root.text;
     accessible-enabled: root.enabled;
     accessible-action-default => { if (root.enabled) { root.clicked(); } }
-    label := Text {
-        x: root.label-padding; width: parent.width - root.label-padding * 2; height: parent.height;
-        text: root.text;
-        font-size: 13px;
-        font-weight: root.primary || root.selected ? 600 : 400;
-        color: !root.enabled ? Theme.muted : root.primary ? (root.danger ? Theme.on-danger : Theme.on-brand) : root.danger ? Theme.danger : Theme.ink;
-        horizontal-alignment: root.menu ? left : center;
-        vertical-alignment: center;
-        overflow: elide;
-        accessible-role: none;
+    HorizontalLayout {
+        x: root.label-padding;
+        width: parent.width - root.label-padding * 2;
+        height: parent.height;
+        spacing: root.has-icon && root.text != "" ? 6px : 0px;
+        alignment: root.menu ? start : center;
+        if root.has-icon: Image {
+            width: 14px;
+            height: 14px;
+            y: (parent.height - self.height) / 2;
+            source: root.icon;
+            colorize: root.fg;
+        }
+        label := Text {
+            text: root.text;
+            font-size: 13px;
+            font-weight: root.primary || root.selected ? 600 : 400;
+            color: root.fg;
+            horizontal-alignment: root.menu ? left : center;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
     }
     focus-scope := FocusScope {
         width: parent.width; height: parent.height;
@@ -103,6 +186,7 @@ export component SecretField inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
     in-out property <bool> revealed;
+    in property <int> mask-serial;
     in property <bool> read-only;
     out property <bool> input-focused: input.has-focus;
     callback edited();
@@ -111,6 +195,7 @@ export component SecretField inherits Rectangle {
     height: 36px;
     vertical-stretch: 0;
     changed text => { if (root.text == "") { root.revealed = false; } }
+    changed mask-serial => { root.revealed = false; }
     HorizontalLayout {
         spacing: 6px;
         input := LineEdit {
@@ -124,28 +209,58 @@ export component SecretField inherits Rectangle {
             accepted => { root.accepted(); }
         }
         Button {
+            icon: root.revealed ? @image-url("../assets/icons/eye-off.svg") : @image-url("../assets/icons/eye.svg");
             text: root.revealed ? "隐藏" : "显示";
+            label-padding: 10px;
             accessible-label: (root.revealed ? "隐藏" : "显示") + (root.label == "" ? root.placeholder-text : root.label);
             enabled: root.enabled;
-            subtle: true;
+            subtle: false;
             clicked => { root.revealed = !root.revealed; }
         }
     }
 }
 
-export component WindowControl inherits Button {
+export component WindowControl inherits Rectangle {
     in property <int> kind;
     in property <bool> maximized;
-    private property <color> icon-color: root.kind == 2 && root.hovered ? Theme.danger : Theme.text;
-    text: ""; subtle: true; danger: kind == 2;
-    width: 36px; height: 30px; label-padding: 0px;
+    in property <bool> nc-hovered;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback clicked();
+    private property <bool> active-hover: root.enabled && (pointer.has-hover || root.nc-hovered);
+    private property <color> icon-color: !root.enabled ? Theme.muted : root.kind == 2 && root.active-hover ? #ffffff : Theme.text;
+    width: 36px;
+    height: 30px;
+    border-radius: 6px;
+    background: !root.active-hover ? transparent : root.kind == 2 ? Theme.close-hover : Theme.hover;
+    opacity: pointer.pressed && root.enabled ? 0.82 : 1;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if (root.enabled) { root.clicked(); } }
     Image {
-        x: 12px; y: 9px; width: 12px; height: 12px; colorize: root.icon-color;
+        x: 12px; y: 9px; width: 12px; height: 12px;
+        colorize: root.icon-color;
         source: root.kind == 0 ? @image-url("../assets/window/minimize.svg") : root.kind == 2 ? @image-url("../assets/window/close.svg") : root.maximized ? @image-url("../assets/window/restore.svg") : @image-url("../assets/window/maximize.svg");
+    }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
     }
 }
 
 export component BrandMark inherits Rectangle {
-    width: 38px; height: 38px; border-radius: 11px; background: Theme.brand;
-    Image { source: @image-url("../assets/keyisle-mark.svg"); colorize: Theme.on-brand; width: parent.width; height: parent.height; }
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    background: Theme.brand;
+    border-width: 1px;
+    border-color: Theme.brand-hover;
+    Image {
+        source: @image-url("../assets/keyisle-mark.svg");
+        colorize: Theme.on-brand;
+        width: parent.width;
+        height: parent.height;
+    }
 }

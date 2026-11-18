@@ -18,9 +18,16 @@ foreach($size in @(256,128,64,48,32,24,20,16)){
   $path.AddArc(32,32,32,32,0,90);$path.AddArc(0,32,32,32,90,90);$path.CloseFigure()
   $graphics.FillPath($brush,$path)
   $pen.StartCap=[Drawing.Drawing2D.LineCap]::Round;$pen.EndCap=[Drawing.Drawing2D.LineCap]::Round
-  $graphics.DrawEllipse($pen,18,18,14,14)
-  $graphics.DrawLine($pen,30,30,43,43);$graphics.DrawLine($pen,36,36,40,32);$graphics.DrawLine($pen,41,41,45,37)
-  $graphics.DrawBezier($pen,14,43,22,51,42,51,50,43)
+  $graphics.DrawEllipse($pen,16.5,15.5,15,15)
+  $dot=[Drawing.SolidBrush]::new([Drawing.Color]::White)
+  $graphics.FillEllipse($dot,20.9,19.9,3.2,3.2)
+  $dot.Dispose()
+  $graphics.DrawLine($pen,29.5,28.5,44,43);$graphics.DrawLine($pen,36.5,35.5,40.7,31.3);$graphics.DrawLine($pen,41.5,40.5,45.7,36.3)
+  $graphics.DrawBezier($pen,13,46.5,20.5,53,43.5,53,51,46.5)
+  $wavePen=[Drawing.Pen]::new([Drawing.Color]::FromArgb(184,255,255,255),2.4)
+  $wavePen.StartCap=[Drawing.Drawing2D.LineCap]::Round;$wavePen.EndCap=[Drawing.Drawing2D.LineCap]::Round
+  $graphics.DrawBezier($wavePen,20,51.5,25.5,54.7,38.5,54.7,44,51.5)
+  $wavePen.Dispose()
   $bitmap.Save($stream,[Drawing.Imaging.ImageFormat]::Png)
   $frames+=,@{Size=$size;Bytes=$stream.ToArray()}
   if($size -eq 256){$bitmap.Save((Join-Path $Destination 'keyisle-preview.png'),[Drawing.Imaging.ImageFormat]::Png)}

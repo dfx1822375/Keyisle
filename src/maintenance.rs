@@ -132,6 +132,52 @@ pub fn backup_list(root: &Path, active: &Path) -> Result<Vec<BackupInfo>> {
     Ok(result)
 }
 
+pub(crate) fn prune_auto_backups(root: &Path, keep: usize) -> Result<()> {
+    let folder = root.join("backups");
+    if !folder.try_exists().map_err(|_| "无法检查本地备份目录。")? {
+        return Ok(());
+    }
+    regular(&folder, true)?;
+    let mut backups: Vec<(u128, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&folder).map_err(|_| "无法读取备份目录。")? {
+        let entry = entry.map_err(|_| "无法读取本地备份。")?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if numbered(name, "auto-") && regular(&entry.path(), false).is_ok() {
+            if let Some(nanos) = name
+                .strip_prefix("auto-")
+                .and_then(|s| s.split('-').next())
+                .and_then(|s| s.parse::<u128>().ok())
+            {
+                backups.push((nanos, entry.path()));
+            }
+        }
+    }
+    backups.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let remove = backups.len().saturating_sub(keep);
+    for (_, path) in backups.into_iter().take(remove) {
+        let _ = fs::remove_file(path);
+    }
+    Ok(())
+}
+
+pub fn inactive_vault_count(root: &Path, active: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            let path = entry.path();
+            path != active
+                && entry.file_name().to_str().is_some_and(vault_name)
+                && regular(&path, false).is_ok()
+        })
+        .count()
+}
+
 fn managed_backup(root: &Path, active: &Path, source: &Path) -> Result<()> {
     if !local_backups(root, active)?.iter().any(|p| p == source) {
         return Err("备份已变化或不在本地备份清单中，请刷新列表。".into());
@@ -350,15 +396,52 @@ pub fn change_master(
             .collect::<std::result::Result<Vec<_>, _>>()?
             .join("\n");
         durable_write(&stage.join("manifest"), manifest.as_bytes())?;
-        for (i, path) in files.iter().enumerate() {
-            canceled(cancel)?;
-            regular(path, false)?;
-            Vault::rekey_copy(path, &stage.join(format!("{i}.new")), old, new).map_err(|_| {
-                format!(
-                    "本地文件 {} 无法解锁、校验或重新加密；全部原文件未替换。",
-                    relative[i].display()
-                )
-            })?;
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, 4))
+            .unwrap_or(2)
+            .min(files.len().max(1));
+        let next_index = std::sync::atomic::AtomicUsize::new(0);
+        let first_error: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        if first_error.lock().unwrap().is_some() {
+                            break;
+                        }
+                        let i = next_index.fetch_add(1, Ordering::SeqCst);
+                        if i >= files.len() {
+                            break;
+                        }
+                        let step = canceled(cancel)
+                            .and_then(|_| regular(&files[i], false))
+                            .and_then(|_| {
+                                Vault::rekey_copy(
+                                    &files[i],
+                                    &stage.join(format!("{i}.new")),
+                                    old,
+                                    new,
+                                )
+                                .map_err(|_| {
+                                    format!(
+                                        "本地文件 {} 无法解锁、校验或重新加密；全部原文件未替换。",
+                                        relative[i].display()
+                                    )
+                                })
+                            });
+                        if let Err(err) = step {
+                            let mut slot = first_error.lock().unwrap();
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(err) = first_error.into_inner().unwrap() {
+            return Err(err);
         }
         canceled(cancel)?;
         durable_write(&stage.join("ready.tmp"), b"1")?;
@@ -682,6 +765,8 @@ const RESET_SETTINGS: &[&str] = &[
     "launch-settings.txt",
     "theme.txt",
     "appearance.txt",
+    "screen-protection.txt",
+    "auto-update.txt",
     "window.txt",
     "last-vault.txt",
     "shortcut.tmp",
@@ -689,6 +774,8 @@ const RESET_SETTINGS: &[&str] = &[
     "launch-settings.tmp",
     "theme.tmp",
     "appearance.tmp",
+    "screen-protection.tmp",
+    "auto-update.tmp",
     "window.tmp",
     "last-vault.tmp",
     "settings-rollback-0.tmp",
@@ -696,6 +783,8 @@ const RESET_SETTINGS: &[&str] = &[
     "settings-rollback-2.tmp",
     "settings-rollback-3.tmp",
     "settings-rollback-4.tmp",
+    "settings-rollback-5.tmp",
+    "settings-rollback-6.tmp",
 ];
 
 fn reset_owned(relative: &Path) -> bool {
@@ -875,6 +964,7 @@ pub fn finish_reset(root: &Path) -> Result<()> {
             fs::remove_dir(backups).map_err(|_| "无法清除空备份目录，请继续还原。")?;
         }
     }
+    crate::update::cleanup_staging(root);
     fs::remove_file(root.join(RESET_PENDING))
         .map_err(|_| "数据已清除，但还原记录尚未清理。请继续完成还原。".into())
 }

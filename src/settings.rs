@@ -3,12 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILES: [&str; 5] = [
+const FILES: [&str; 7] = [
     "shortcut.txt",
     "lock-settings.txt",
     "launch-settings.txt",
     "theme.txt",
     "appearance.txt",
+    "screen-protection.txt",
+    "auto-update.txt",
 ];
 
 pub fn load_theme(root: &Path) -> Result<i32, String> {
@@ -37,6 +39,46 @@ pub fn save_theme(root: &Path, index: i32) -> Result<(), String> {
     fs::write(&temp, format!("{name}\n")).map_err(|_| "无法写入配色设置。")?;
     fs::rename(temp, root.join("theme.txt")).map_err(|_| "无法保存配色设置。".into())
 }
+
+pub fn load_screen_protection(root: &Path) -> Result<bool, String> {
+    match fs::read_to_string(root.join("screen-protection.txt")) {
+        Ok(text) => match text.trim() {
+            "0" | "off" => Ok(false),
+            "1" | "on" => Ok(true),
+            _ => Err("防截屏保护设置无效，请保留文件并检查。".into()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("无法读取防截屏保护设置。".into()),
+    }
+}
+
+pub fn save_screen_protection(root: &Path, enabled: bool) -> Result<(), String> {
+    let value = if enabled { "1\n" } else { "0\n" };
+    let temp = root.join("screen-protection.tmp");
+    fs::write(&temp, value).map_err(|_| "无法写入防截屏保护设置。")?;
+    fs::rename(temp, root.join("screen-protection.txt"))
+        .map_err(|_| "无法保存防截屏保护设置。".into())
+}
+
+pub fn load_auto_update(root: &Path) -> Result<bool, String> {
+    match fs::read_to_string(root.join("auto-update.txt")) {
+        Ok(text) => match text.trim() {
+            "0" | "off" => Ok(false),
+            "1" | "on" => Ok(true),
+            _ => Err("自动更新检查设置无效，请保留文件并检查。".into()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(_) => Err("无法读取自动更新检查设置。".into()),
+    }
+}
+
+pub fn save_auto_update(root: &Path, enabled: bool) -> Result<(), String> {
+    let value = if enabled { "1\n" } else { "0\n" };
+    let temp = root.join("auto-update.tmp");
+    fs::write(&temp, value).map_err(|_| "无法写入自动更新检查设置。")?;
+    fs::rename(temp, root.join("auto-update.txt")).map_err(|_| "无法保存自动更新检查设置。".into())
+}
+
 pub struct Snapshot {
     root: PathBuf,
     files: Vec<Option<Vec<u8>>>,
@@ -100,22 +142,34 @@ fn rollback_preserves_exact_files_and_absent_defaults() {
 }
 
 #[test]
-fn themes_round_trip_reject_unknown_values_and_roll_back() {
+fn themes_and_screen_protection_round_trip_and_roll_back() {
     let root = std::env::temp_dir().join(format!("theme-settings-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     assert_eq!(load_theme(&root).unwrap(), 0);
+    assert!(!load_screen_protection(&root).unwrap());
+    assert!(load_auto_update(&root).unwrap());
     for index in 0..4 {
         save_theme(&root, index).unwrap();
         assert_eq!(load_theme(&root).unwrap(), index);
     }
+    save_screen_protection(&root, true).unwrap();
+    save_auto_update(&root, false).unwrap();
+    assert!(load_screen_protection(&root).unwrap());
+    assert!(!load_auto_update(&root).unwrap());
     let snapshot = Snapshot::capture(&root).unwrap();
     save_theme(&root, 1).unwrap();
+    save_screen_protection(&root, false).unwrap();
+    save_auto_update(&root, true).unwrap();
     snapshot.restore().unwrap();
     assert_eq!(load_theme(&root).unwrap(), 3);
+    assert!(load_screen_protection(&root).unwrap());
+    assert!(!load_auto_update(&root).unwrap());
     assert!(save_theme(&root, 4).is_err());
     assert_eq!(load_theme(&root).unwrap(), 3);
     fs::write(root.join("theme.txt"), "unknown").unwrap();
     assert!(load_theme(&root).is_err());
+    fs::write(root.join("auto-update.txt"), "unknown").unwrap();
+    assert!(load_auto_update(&root).is_err());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -146,7 +200,7 @@ pub fn save_appearance(root: &Path, index: i32) -> Result<(), String> {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WindowLayout {
-    // Workspace coordinates are only exchanged through Get/SetWindowPlacement.
+    // Virtual-screen coordinates captured via GetWindowRect and restored via SetWindowPos.
     pub left: i32,
     pub top: i32,
     pub right: i32,

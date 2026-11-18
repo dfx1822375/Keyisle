@@ -33,8 +33,9 @@ function CaptureWizard($process,[string]$name){
  $r=$window.Current.BoundingRectangle;$b=[Drawing.Bitmap]::new([int]$r.Width,[int]$r.Height);$g=[Drawing.Graphics]::FromImage($b)
  try{$g.CopyFromScreen([int]$r.Left,[int]$r.Top,0,0,$b.Size);$b.Save((Join-Path $DataDir $name),[Drawing.Imaging.ImageFormat]::Png)}finally{$g.Dispose();$b.Dispose()}
 }
-Assert ($SetupPath -like '*-test.exe') 'Use only isolated test installer'
-Assert ($DataDir -match 'test-v1\.0\.0-') 'Use isolated test root'
+Assert ([IO.Path]::GetFileName($SetupPath) -match '^Keyisle-(\d+\.\d+\.\d+)-Setup-x64-test\.exe$') 'Use only isolated test installer'
+$expectedVersion=$Matches[1]
+Assert ([IO.Path]::GetFileName($DataDir) -like "test-v$expectedVersion-*") 'Use isolated test root'
 Assert ([VaultTestNative]::FindWindow('PasswordManagerPrototypeEvents','PasswordManagerPrototypeEvents') -eq [IntPtr]::Zero) 'Close existing app first'
 $registry='HKCU:\Software\KeyisleInstallerTests'
 Assert (-not (Test-Path $registry)) 'Prior installer test registry exists; do not mix runs'
@@ -57,11 +58,11 @@ try{
  $wizard=Start-Process -FilePath $SetupPath -PassThru;CaptureWizard $wizard '01-installer-welcome.png';Stop-Process -Id $wizard.Id -Force;$wizard=$null;Pause 200
  RunSetup
  Assert (Test-Path $ExePath) 'Install missing app';Assert (Test-Path (Join-Path $install 'Uninstall.exe')) 'Uninstaller missing'
- $version=[Diagnostics.FileVersionInfo]::GetVersionInfo($ExePath);Assert ($version.ProductName -eq 'Keyisle' -and $version.ProductVersion -eq '1.0.0') 'Embedded product metadata incorrect'
+ $version=[Diagnostics.FileVersionInfo]::GetVersionInfo($ExePath);Assert ($version.ProductName -eq 'Keyisle' -and $version.ProductVersion -eq $expectedVersion) 'Embedded product metadata incorrect'
  $icon=[Drawing.Icon]::ExtractAssociatedIcon($ExePath);$bitmap=$icon.ToBitmap();try{$pixel=$bitmap.GetPixel([int]($bitmap.Width/5),[int]($bitmap.Height/2));Assert ([Math]::Abs($pixel.R-17) -lt 12 -and [Math]::Abs($pixel.G-103) -lt 12 -and [Math]::Abs($pixel.B-95) -lt 12) 'Executable still uses generic icon'}finally{$bitmap.Dispose();$icon.Dispose()}
  $shell=New-Object -ComObject WScript.Shell
  foreach($path in @('test-shortcuts\menu\Keyisle.lnk','test-shortcuts\desktop\Keyisle.lnk')){$link=$shell.CreateShortcut((Join-Path $install $path));Assert ($link.TargetPath -eq $ExePath) "Broken shortcut: $path"}
- $entry=Get-ItemProperty -LiteralPath ($registry+'\Uninstall');Assert ($entry.DisplayVersion -eq '1.0.0') 'Uninstall version missing'
+ $entry=Get-ItemProperty -LiteralPath ($registry+'\Uninstall');Assert ($entry.DisplayVersion -eq $expectedVersion) 'Uninstall version missing'
  Assert ($entry.UninstallString -eq ('"'+(Join-Path $install 'Uninstall.exe')+'"')) 'Uninstall command not quoted'
  Write-Output 'PASS: branded Unicode per-user installer creates app, multi-size icon/version resources, shortcuts and quoted uninstall registration in an isolated location.'
  StartApp;Unlock 'GUI-Master-Only!2026';SetEdit 0 'atrust';Assert (TextExists 'aTrust 测试') 'Legacy 0.12 account did not survive first-release upgrade';SetEdit 0 ''
@@ -73,8 +74,22 @@ try{
  Assert ((Hash (Join-Path $vaultDir 'vault.db')) -eq $before) 'Cover install changed vault'
  foreach($name in $preferences.Keys){Assert ((Hash (Join-Path $vaultDir $name)) -eq $preferences[$name]) "Cover install changed preference: $name"}
  Assert ((Get-Content -Raw (Join-Path $install 'README.md')) -ne 'old program file') 'Cover install did not replace program docs'
- StartApp;RunSetup 10;StopApp;Assert ((Hash (Join-Path $vaultDir 'vault.db')) -eq $before) 'Busy install altered vault'
- Write-Output 'PASS: actual 0.12 fixture opens with preserved accounts; cover install preserves encrypted vault and preferences; running app blocks replacement without forced termination.'
+ $programBefore=Hash $ExePath
+ Set-Content -LiteralPath (Join-Path $install 'README.md') -Value 'locked program sentinel'
+ $handle=[IO.File]::Open($ExePath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+ try{RunSetup 12}finally{$handle.Dispose()}
+ Assert ((Hash $ExePath) -eq $programBefore) 'Failed cover install changed the locked executable'
+ Assert ((Get-Content -LiteralPath (Join-Path $install 'README.md')) -eq 'locked program sentinel') 'Failed cover install changed program docs'
+ Assert ((Hash (Join-Path $vaultDir 'vault.db')) -eq $before) 'Failed cover install changed the vault'
+ Write-Output 'PASS: locked executable prevents silent setup from reporting success or changing program files.'
+ Set-Content -LiteralPath (Join-Path $install 'README.md') -Value 'running cover install'
+ StartApp;RunSetup 0;$script:process.WaitForExit(3000)|Out-Null;$script:process=$null
+ Assert ((Get-Content -Raw (Join-Path $install 'README.md')) -ne 'running cover install') 'Running cover install did not replace program files'
+ Assert ((Hash (Join-Path $vaultDir 'vault.db')) -eq $before) 'Running cover install altered vault'
+ StartApp;Unlock 'GUI-Master-Only!2026';Button '新增账号';SetEdit 0 'Unsaved installer draft'
+ RunSetup 10;Assert (TextExists '未保存的修改') 'Installer did not preserve unsaved draft prompt';Button '放弃修改并退出';$script:process.WaitForExit(3000)|Out-Null;$script:process=$null
+ Assert ((Hash (Join-Path $vaultDir 'vault.db')) -eq $before) 'Busy install altered vault'
+ Write-Output 'PASS: actual 0.12 fixture opens with preserved accounts; cover install seamlessly closes idle running app while preserving unsaved drafts without forced termination.'
  New-Item -ItemType Directory -Force $testRun|Out-Null
  Set-ItemProperty -LiteralPath $testRun -Name WindowsPasswordManager -Value '"C:\old-location\Keyisle.exe" --autostart'
  StartApp;Pause 300

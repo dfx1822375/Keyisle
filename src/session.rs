@@ -1,13 +1,21 @@
-use crate::vault::Vault;
+use crate::vault::{PreparedSummary, Summary, Vault};
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub struct VaultCache {
+    pub entries: Vec<(Summary, PreparedSummary)>,
+    pub categories: Vec<String>,
+    pub tags: Vec<String>,
+}
+
 pub struct Session {
     pub vault: Option<Vault>,
+    pub cache: Option<VaultCache>,
     pub path: PathBuf,
     pub root: PathBuf,
     pub generation: u64,
@@ -32,7 +40,8 @@ impl Session {
         fs::create_dir_all(&root).map_err(|_| "无法创建用户数据目录。")?;
         let preference = root.join("last-vault.txt");
         let path = if preference.exists() {
-            let value = fs::read_to_string(preference).map_err(|_| "无法读取密码库路径设置。")?;
+            let raw = fs::read_to_string(preference).map_err(|_| "无法读取密码库路径设置。")?;
+            let value = raw.trim_end_matches(['\r', '\n']);
             if value.is_empty() || value.len() > 32768 {
                 return Err("密码库路径设置损坏。".into());
             }
@@ -42,6 +51,7 @@ impl Session {
         };
         Ok(Self {
             vault: None,
+            cache: None,
             path,
             root,
             generation: 0,
@@ -57,13 +67,48 @@ impl Session {
         fs::write(&temporary, path)
             .and_then(|_| fs::rename(&temporary, self.root.join("last-vault.txt")))
             .map_err(|_| "无法保存密码库路径设置，文件仍保留在显示的路径。")?;
+        self.cache = None;
         self.vault = Some(vault);
         Ok(())
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.cache = None;
+    }
+
+    pub fn ensure_cache(&mut self) -> Result<Option<&VaultCache>, String> {
+        if self.vault.is_none() {
+            self.cache = None;
+            return Ok(None);
+        }
+        if self.cache.is_none() {
+            let records = self.vault.as_ref().unwrap().list()?;
+            let mut categories = BTreeSet::new();
+            let mut tags = BTreeSet::new();
+            let mut entries = Vec::with_capacity(records.len());
+            for record in records {
+                if !record.category.is_empty() {
+                    categories.insert(record.category.clone());
+                }
+                let prepared = PreparedSummary::from_summary(&record);
+                for tag in &prepared.tag_list {
+                    tags.insert(tag.clone());
+                }
+                entries.push((record, prepared));
+            }
+            self.cache = Some(VaultCache {
+                entries,
+                categories: categories.into_iter().collect(),
+                tags: tags.into_iter().collect(),
+            });
+        }
+        Ok(self.cache.as_ref())
     }
 
     pub fn lock(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.vault = None;
+        self.cache = None;
         self.auth_owner = None;
     }
 
@@ -74,21 +119,7 @@ impl Session {
             .as_mut()
             .ok_or("密码库已锁定。")?
             .backup(&folder.join(unique_name("auto")))?;
-        let mut backups: Vec<_> = fs::read_dir(&folder)
-            .map_err(|_| "无法读取备份目录。")?
-            .filter_map(Result::ok)
-            .filter(|e| {
-                e.file_name().to_string_lossy().starts_with("auto-")
-                    && e.path().extension().is_some_and(|e| e == "db")
-            })
-            .map(|e| e.path())
-            .collect();
-        backups.sort();
-        let remove = backups.len().saturating_sub(10);
-        for path in backups.into_iter().take(remove) {
-            let _ = fs::remove_file(path);
-        }
-        Ok(())
+        crate::maintenance::prune_auto_backups(&self.root, 10)
     }
 
     pub fn restore_copy(&mut self, source: &Path) -> Result<(), String> {
@@ -151,13 +182,23 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        session.backup_before_change().unwrap();
-        let backup = fs::read_dir(root.join("backups"))
+        fs::create_dir_all(root.join("backups")).unwrap();
+        let unmanaged = root.join("backups/auto-0.db");
+        fs::write(&unmanaged, b"external user file").unwrap();
+        for _ in 0..12 {
+            session.backup_before_change().unwrap();
+        }
+        assert!(unmanaged.exists());
+        assert_eq!(
+            crate::maintenance::local_backups(&root, &original)
+                .unwrap()
+                .len(),
+            10
+        );
+        let backup = crate::maintenance::local_backups(&root, &original)
             .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
+            .pop()
+            .unwrap();
         session
             .vault
             .as_mut()
@@ -174,7 +215,16 @@ mod tests {
         let vault = Vault::open(&restored, master).unwrap();
         assert_eq!(vault.list().unwrap().len(), 1);
         session.accept(vault).unwrap();
+        fs::write(
+            root.join("last-vault.txt"),
+            format!("{}\r\n", restored.display()),
+        )
+        .unwrap();
         assert_eq!(Session::new(root.clone()).unwrap().path, restored);
+        assert_eq!(
+            crate::maintenance::inactive_vault_count(&root, &restored),
+            1
+        );
         assert_eq!(
             Vault::open(&original, master)
                 .unwrap()

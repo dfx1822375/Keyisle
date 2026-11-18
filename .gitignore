@@ -13,6 +13,7 @@ __pycache__/
 *.bak
 *.key
 *.pem
+!/assets/release-public.pem
 *.pfx
 *.p12
 .env

@@ -2,8 +2,12 @@ import importlib.util
 import hashlib
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_signing
 
 spec = importlib.util.spec_from_file_location('package_release', Path(__file__).with_name('package-release.py'))
 release = importlib.util.module_from_spec(spec)
@@ -69,7 +73,7 @@ class RetentionTests(unittest.TestCase):
                 file = project / path
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b'synthetic release payload')
-            inputs=['dist/windows-password-manager.exe','README.md','THIRD-PARTY-NOTICES.txt','installer/keyisle.nsi','assets/keyisle.ico','assets/keyisle-installer.bmp']
+            inputs=['dist/windows-password-manager.exe','README.md','README.zh-CN.md','LICENSE','THIRD-PARTY-NOTICES.txt','installer/keyisle.nsi','assets/keyisle.ico','assets/keyisle-installer.bmp']
             for name in inputs:
                 file=project/name
                 if not file.exists():
@@ -78,16 +82,32 @@ class RetentionTests(unittest.TestCase):
             installer.parent.mkdir();installer.write_bytes(b'synthetic installer')
             receipt={'version':'0.6.0','test_mode':False,'installer_sha256':hashlib.sha256(installer.read_bytes()).hexdigest(),'inputs_sha256':{name:hashlib.sha256((project/name).read_bytes()).hexdigest() for name in inputs}}
             installer.with_suffix('.build.json').write_text(json.dumps(receipt))
+            with self.assertRaises(RuntimeError):
+                release.publish(build, project)
+            private_key = build / 'keys/release-signing.pem'
+            public_key = project / 'assets/release-public.pem'
+            release_signing.generate_keypair(private_key, public_key)
+            original = private_key.read_bytes(), public_key.read_bytes()
+            with self.assertRaises(FileExistsError):
+                release_signing.generate_keypair(private_key, public_key)
+            self.assertEqual((private_key.read_bytes(), public_key.read_bytes()), original)
             (project / 'private.db').write_bytes(b'never package this')
             (project/'README.md').write_bytes(b'changed after installer build')
             with self.assertRaises(RuntimeError):
                 release.publish(build, project)
             self.assertFalse((build/'windows-password-manager.exe').exists())
             (project/'README.md').write_bytes(b'synthetic release payload')
-            release.publish(build, project)
+            release.publish(build, project, notes='支持在线签名更新与覆盖升级')
             self.assertEqual((build / 'windows-password-manager.exe').read_bytes(),
                              (build / 'release/windows-password-manager.exe').read_bytes())
             self.assertFalse((build / 'release/private.db').exists())
+            manifest = json.loads((build / 'release-v0.6.0/update.json').read_text(encoding='utf-8'))
+            self.assertEqual(manifest['version'], '0.6.0')
+            self.assertEqual(manifest['notes'], '支持在线签名更新与覆盖升级')
+            release_signing.verify_manifest(manifest, project / 'assets/release-public.pem')
+            tampered = dict(manifest, installer_size=manifest['installer_size'] + 1)
+            with self.assertRaises(RuntimeError):
+                release_signing.verify_manifest(tampered, project / 'assets/release-public.pem')
             with self.assertRaises(RuntimeError):
                 release.publish(build, project)
 

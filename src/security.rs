@@ -5,6 +5,7 @@ use std::{
     sync::Mutex,
     time::{Duration, Instant},
 };
+use zeroize::{Zeroize, Zeroizing};
 
 pub const LOCK_MINUTES: [u32; 5] = [1, 5, 15, 30, 60];
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,6 +144,89 @@ impl Grant {
     }
 }
 
+fn fill_random_bytes(buf: &mut [u8]) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+        };
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status != 0 {
+            return Err("无法从系统安全随机源生成密码。".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        use std::io::Read;
+        fs::File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(buf))
+            .map_err(|_| "无法从系统安全随机源生成密码。".into())
+    }
+}
+
+/// Generates a high-entropy random password using OS CSPRNG without touching the clipboard.
+pub fn generate_password(
+    length: usize,
+    include_symbols: bool,
+) -> Result<Zeroizing<String>, String> {
+    const UPPER: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const LOWER: &[u8] = b"abcdefghijkmnopqrstuvwxyz";
+    const DIGITS: &[u8] = b"23456789";
+    const SYMBOLS: &[u8] = b"!@#$%^&*-_=+?";
+    if !(12..=64).contains(&length) {
+        return Err("生成密码长度需在 12～64 位之间。".into());
+    }
+    let mut pool = Zeroizing::new([0u8; 128]);
+    let mut cursor = pool.len();
+    let mut uniform = |bound: usize| -> Result<usize, String> {
+        let limit = 256 - (256 % bound);
+        loop {
+            if cursor >= pool.len() {
+                fill_random_bytes(&mut *pool)?;
+                cursor = 0;
+            }
+            let byte = pool[cursor] as usize;
+            cursor += 1;
+            if byte < limit {
+                return Ok(byte % bound);
+            }
+        }
+    };
+    let mut classes: Vec<&[u8]> = vec![UPPER, LOWER, DIGITS];
+    if include_symbols {
+        classes.push(SYMBOLS);
+    }
+    let mut all = Vec::with_capacity(72);
+    for class in &classes {
+        all.extend_from_slice(class);
+    }
+    let mut out = Zeroizing::new(Vec::with_capacity(length));
+    for class in &classes {
+        out.push(class[uniform(class.len())?]);
+    }
+    while out.len() < length {
+        out.push(all[uniform(all.len())?]);
+    }
+    for i in (1..out.len()).rev() {
+        let j = uniform(i + 1)?;
+        out.swap(i, j);
+    }
+    let mut text = String::with_capacity(length);
+    for &b in out.iter() {
+        text.push(b as char);
+    }
+    all.zeroize();
+    Ok(Zeroizing::new(text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +302,23 @@ mod tests {
             ProtectedAction::Fill(7, FillMode::Username),
             1
         ));
+    }
+    #[test]
+    fn password_generator_enforces_length_character_classes_and_fill_compatibility() {
+        assert!(generate_password(11, true).is_err());
+        assert!(generate_password(65, true).is_err());
+        let first = generate_password(20, true).unwrap();
+        let second = generate_password(20, true).unwrap();
+        assert_eq!(first.len(), 20);
+        assert_ne!(first.as_str(), second.as_str());
+        assert!(first.chars().any(|c| c.is_ascii_uppercase()));
+        assert!(first.chars().any(|c| c.is_ascii_lowercase()));
+        assert!(first.chars().any(|c| c.is_ascii_digit()));
+        assert!(first.chars().any(|c| "!@#$%^&*-_=+?".contains(c)));
+        assert!(crate::input_units(&first).is_ok());
+
+        let alpha = generate_password(16, false).unwrap();
+        assert_eq!(alpha.len(), 16);
+        assert!(alpha.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 }

@@ -1,10 +1,11 @@
 Unicode True
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 !include "x64.nsh"
 
 !ifndef VERSION
- !define VERSION "1.0.0"
+ !error "VERSION must be supplied by the release build."
 !endif
 !ifdef TEST_MODE
  !define PRODUCT_KEY "Software\KeyisleInstallerTests\Install"
@@ -42,7 +43,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Keyisle contributors"
 !define MUI_UNWELCOMEFINISHPAGE_BITMAP "${BANNER}"
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEPAGE_TITLE "安装 Keyisle"
-!define MUI_WELCOMEPAGE_TEXT "密屿，一款轻量的本地密码管理器。$\r$\n$\r$\n安装到当前 Windows 用户，无需管理员权限。安装与升级会保留已有密码库、主密码、备份和偏好。$\r$\n$\r$\n请先从托盘退出正在运行的旧版程序。"
+!define MUI_WELCOMEPAGE_TEXT "密屿，一款轻量的本地密码管理器。$\r$\n$\r$\n安装到当前 Windows 用户，无需管理员权限。安装与覆盖升级会保留已有密码库、主密码、备份和偏好。$\r$\n$\r$\n若 Keyisle 正在运行，安装时会自动通知其锁库并平滑退出（如有未保存修改会先提示处理）。"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\Keyisle.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "启动 Keyisle"
 !define MUI_UNWELCOMEPAGE_TITLE "卸载 Keyisle"
@@ -62,14 +63,35 @@ SetFont /LANG=${LANG_SIMPCHINESE} "Microsoft YaHei UI" 9
 
 Var OldInstallDir
 
-!macro CheckRunning
- System::Call 'user32::FindWindowW(w "PasswordManagerPrototypeEvents", w "PasswordManagerPrototypeEvents") p.r0'
- ${If} $0 != 0
-  IfSilent +2
-  MessageBox MB_ICONEXCLAMATION|MB_OK "请先从托盘退出 Keyisle／旧版密码助手，再运行安装或卸载。未修改任何文件。"
-  SetErrorLevel 10
-  Abort
- ${EndIf}
+!macro RequestGracefulExit TAG EXIT_CMD
+ retry_running_${TAG}:
+  System::Call 'user32::FindWindowW(w "PasswordManagerPrototypeEvents", w "PasswordManagerPrototypeEvents") p.r0'
+  ${If} $0 != 0
+   System::Call 'user32::PostMessageW(p r0, i 0x0010, p 0, p 0)'
+  ${EndIf}
+  StrCpy $2 0
+  ${DoWhile} $2 < 50
+   System::Call 'user32::FindWindowW(w "PasswordManagerPrototypeEvents", w "PasswordManagerPrototypeEvents") p.r0'
+   ${If} $0 == 0
+    System::Call 'kernel32::OpenMutexW(i 0x00100000, i 0, w "Local\WindowsPasswordManagerPrototype") p.r1'
+    ${If} $1 != 0
+     System::Call 'kernel32::CloseHandle(p r1)'
+     StrCpy $0 1
+    ${EndIf}
+   ${EndIf}
+   ${If} $0 == 0
+    ${Break}
+   ${EndIf}
+   Sleep 100
+   IntOp $2 $2 + 1
+  ${Loop}
+  ${If} $0 != 0
+   IfSilent silent_busy_${TAG}
+   MessageBox MB_ICONEXCLAMATION|MB_RETRYCANCEL "Keyisle 当前有未保存的账号修改或正在执行的维护操作，无法自动关闭。$\r$\n$\r$\n请先在 Keyisle 窗口中保存或放弃修改后点击“重试”继续，或点击“取消”中止（未修改任何文件）。" IDRETRY retry_running_${TAG}
+   silent_busy_${TAG}:
+   SetErrorLevel 10
+   ${EXIT_CMD}
+  ${EndIf}
 !macroend
 
 Function .onInit
@@ -82,7 +104,6 @@ Function .onInit
  SetShellVarContext current
  SetRegView 64
  ReadRegStr $OldInstallDir HKCU "${PRODUCT_KEY}" "InstallDir"
- !insertmacro CheckRunning
 FunctionEnd
 
 Function .onVerifyInstDir
@@ -91,18 +112,49 @@ Function .onVerifyInstDir
  ${EndIf}
 FunctionEnd
 
+Function .onInstSuccess
+ ${GetParameters} $0
+ ClearErrors
+ ${GetOptions} $0 "/AUTORELAUNCH" $1
+ ${IfNot} ${Errors}
+  Exec '"$INSTDIR\Keyisle.exe"'
+ ${EndIf}
+FunctionEnd
+
 Function un.onInit
  SetShellVarContext current
  SetRegView 64
- !insertmacro CheckRunning
+ !insertmacro RequestGracefulExit uninst Abort
 FunctionEnd
 
 Section "Keyisle（必需）" Application
  SectionIn RO
+ !insertmacro RequestGracefulExit inst Quit
+ ; Wait until Windows releases any exiting Keyisle.exe image mapping before overwriting.
+ ${If} ${FileExists} "$INSTDIR\Keyisle.exe"
+  StrCpy $2 0
+  ${DoWhile} $2 < 50
+   System::Call 'kernel32::CreateFileW(w "$INSTDIR\Keyisle.exe", i 0x40000000, i 1, p 0, i 3, i 0x80, p 0) p.r0'
+   ${If} $0 != -1
+    System::Call 'kernel32::CloseHandle(p r0)'
+    ${Break}
+   ${EndIf}
+   Sleep 100
+   IntOp $2 $2 + 1
+  ${Loop}
+  ${If} $2 >= 50
+   IfSilent +2
+   MessageBox MB_ICONEXCLAMATION|MB_OK "程序文件仍被占用或目录不可写，未执行覆盖安装。请关闭占用程序后重试。"
+   SetErrorLevel 12
+   Quit
+  ${EndIf}
+ ${EndIf}
  SetOutPath "$INSTDIR"
  SetOverwrite on
  File /oname=Keyisle.exe "${APP_EXE}"
  File /oname=README.md "${README}"
+ File /oname=README.zh-CN.md "${README_ZH}"
+ File /oname=LICENSE "${LICENSE}"
  File /oname=THIRD-PARTY-NOTICES.txt "${NOTICES}"
  WriteUninstaller "$INSTDIR\Uninstall.exe"
  WriteRegStr HKCU "${PRODUCT_KEY}" "InstallDir" "$INSTDIR"
@@ -143,6 +195,8 @@ Section "Uninstall"
   Quit
  ${EndIf}
  Delete "$INSTDIR\README.md"
+ Delete "$INSTDIR\README.zh-CN.md"
+ Delete "$INSTDIR\LICENSE"
  Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
  Delete "$INSTDIR\Uninstall.exe"
  Delete "${DESKTOP_FOLDER}\Keyisle.lnk"

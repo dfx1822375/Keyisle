@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Publish a checked build, then retain three releases and matching diagnostics."""
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_signing
+
 PROJECT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = Path('/mnt/e/CodexBuild/windows-password-manager')
+GITHUB_RELEASE_BASE = 'https://github.com/dfx1822375/Keyisle/releases/download'
 PAYLOAD = {
     'Keyisle.exe': 'dist/windows-password-manager.exe',
     'README.md': 'README.md',
     'README.zh-CN.md': 'README.zh-CN.md',
-    'test-input.html': 'docs/test-input.html',
-    'docs/acceptance.md': 'docs/acceptance.md',
-    'docs/validation.md': 'docs/validation.md',
     'docs/storage.md': 'docs/storage.md',
     'docs/preview.png': 'docs/preview.png',
     'docs/screenshots/quick-fill.png': 'docs/screenshots/quick-fill.png',
@@ -138,7 +141,7 @@ def organize_diagnostics(root):
             path.rename(folder / ('stable-' + name))
 
 
-def publish(root, project=PROJECT):
+def publish(root, project=PROJECT, notes=None):
     safe_tree_shallow(root)
     package = re.search(r'(?ms)^\[package\]\s*\n(.*?)(?=^\[|\Z)', (project / 'Cargo.toml').read_text())
     version = re.search(r'(?m)^version\s*=\s*"(\d+\.\d+\.\d+)"\s*$', package[1])[1]
@@ -147,6 +150,10 @@ def publish(root, project=PROJECT):
     destination = root / ('release-v' + version)
     if destination.exists():
         raise RuntimeError(f'Archive already exists; do not overwrite a released version: {destination}')
+    signing_key = Path(os.environ['KEYISLE_SIGNING_KEY']) if os.environ.get('KEYISLE_SIGNING_KEY') else (root / 'keys/release-signing.pem')
+    public_key = project / 'assets/release-public.pem'
+    if not signing_key.is_file() or not public_key.is_file():
+        raise RuntimeError('Missing release signing keypair; generate keys/release-signing.pem and assets/release-public.pem before publishing.')
     installer_name = f'Keyisle-{version}-Setup-x64.exe'
     installer = root / 'installer' / installer_name
     receipt_path = installer.with_suffix('.build.json')
@@ -157,14 +164,18 @@ def publish(root, project=PROJECT):
         raise RuntimeError('Wrong version or isolated test installer; not publishable.')
     if hashlib.sha256(installer.read_bytes()).hexdigest() != receipt.get('installer_sha256'):
         raise RuntimeError('Installer changed after building.')
+    required_inputs = {
+        'dist/windows-password-manager.exe', 'README.md', 'README.zh-CN.md', 'LICENSE',
+        'THIRD-PARTY-NOTICES.txt', 'installer/keyisle.nsi', 'assets/keyisle.ico', 'assets/keyisle-installer.bmp'
+    }
     for name, digest in receipt['inputs_sha256'].items():
-        if name not in {'dist/windows-password-manager.exe', 'README.md', 'THIRD-PARTY-NOTICES.txt', 'installer/keyisle.nsi', 'assets/keyisle.ico', 'assets/keyisle-installer.bmp'}:
+        if name not in required_inputs:
             raise RuntimeError('Unexpected installer input path.')
         if hashlib.sha256((project / name).read_bytes()).hexdigest() != digest:
             raise RuntimeError(f'Installer input changed; rebuild it: {name}')
-    required_inputs = {'dist/windows-password-manager.exe', 'README.md', 'THIRD-PARTY-NOTICES.txt', 'installer/keyisle.nsi', 'assets/keyisle.ico', 'assets/keyisle-installer.bmp'}
     if set(receipt['inputs_sha256']) != required_inputs:
         raise RuntimeError('Incomplete installer build receipt.')
+    release_notes = notes if notes is not None else os.environ.get('KEYISLE_RELEASE_NOTES', f'Keyisle v{version} 正式版更新')
     with tempfile.TemporaryDirectory(prefix='.package-', dir=root) as temporary:
         stage = Path(temporary)
         for name, source in PAYLOAD.items():
@@ -184,7 +195,33 @@ def publish(root, project=PROJECT):
             assert bundle.read('Keyisle.exe') == (stage / 'Keyisle.exe').read_bytes()
         shutil.copy2(installer, stage / installer_name)
         shutil.copy2(receipt_path, stage / 'BUILD-INFO.json')
-        downloads = ''.join(f'{hashlib.sha256((stage / name).read_bytes()).hexdigest()}  {name}\n' for name in [installer_name, archive_name])
+        installer_bytes = (stage / installer_name).read_bytes()
+        portable_bytes = archive.read_bytes()
+        exe_bytes = (stage / 'Keyisle.exe').read_bytes()
+        manifest = release_signing.sign_manifest(
+            {
+                'schema': 1,
+                'version': version,
+                'published_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'notes': release_notes,
+                'installer_name': installer_name,
+                'installer_url': f'{GITHUB_RELEASE_BASE}/v{version}/{installer_name}',
+                'installer_sha256': hashlib.sha256(installer_bytes).hexdigest(),
+                'installer_size': len(installer_bytes),
+                'portable_name': archive_name,
+                'portable_url': f'{GITHUB_RELEASE_BASE}/v{version}/{archive_name}',
+                'portable_sha256': hashlib.sha256(portable_bytes).hexdigest(),
+                'portable_size': len(portable_bytes),
+                'exe_sha256': hashlib.sha256(exe_bytes).hexdigest(),
+            },
+            signing_key,
+            public_key,
+        )
+        (stage / 'update.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        downloads = ''.join(
+            f'{hashlib.sha256((stage / name).read_bytes()).hexdigest()}  {name}\n'
+            for name in [installer_name, archive_name, 'update.json']
+        )
         (stage / 'SHA256SUMS').write_text(downloads)
         release = root / 'release'
         release.mkdir(exist_ok=True)
@@ -194,7 +231,7 @@ def publish(root, project=PROJECT):
             candidate = target.with_suffix('.exe.new')
             shutil.copy2(stage / 'Keyisle.exe', candidate)
             os.replace(candidate, target)
-        for name in [*PAYLOAD, 'SHA256SUMS', 'PAYLOAD-SHA256SUMS', installer_name]:
+        for name in [*PAYLOAD, 'SHA256SUMS', 'PAYLOAD-SHA256SUMS', 'update.json', installer_name]:
             target = release / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(stage / name, target)
@@ -212,11 +249,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build-root', type=Path, default=Path(os.environ.get('PASSWORD_MANAGER_BUILD_ROOT', DEFAULT_ROOT)))
     parser.add_argument('--keep', type=int, choices=range(1, 11), default=3)
+    parser.add_argument('--notes', type=str, default=None, help='Release notes embedded in signed update.json')
     parser.add_argument('--prune-only', action='store_true')
     parser.add_argument('--dry-run', action='store_true', help='Only list release pruning, never publish or move files')
     args = parser.parse_args()
     if not args.prune_only and not args.dry_run:
-        publish(args.build_root)
+        publish(args.build_root, notes=args.notes)
     if not args.dry_run:
         organize_diagnostics(args.build_root)
     print('KEEP:', ', '.join(prune(args.build_root, args.keep, args.dry_run)))

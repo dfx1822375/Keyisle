@@ -7,81 +7,8 @@ pub mod session;
 pub mod settings;
 pub mod shortcut;
 pub mod startup;
+pub mod update;
 pub mod vault;
-
-pub struct Record {
-    pub title: &'static str,
-    pub username: &'static str,
-    pub password: &'static str,
-    pub category: &'static str,
-    pub tags: &'static [&'static str],
-}
-
-// All credentials are deliberately fake; this prototype never loads or saves secrets.
-pub const DEMO: [Record; 5] = [
-    Record {
-        title: "Chrome 示例网站",
-        username: "demo.web@example.invalid",
-        password: "Demo-Web!2026",
-        category: "工作 / 示例项目",
-        tags: &["网页", "测试"],
-    },
-    Record {
-        title: "aTrust 示例账号",
-        username: "demo.atrust",
-        password: "Demo-aTrust!2026",
-        category: "工作 / 示例项目",
-        tags: &["客户端", "测试"],
-    },
-    Record {
-        title: "数据库示例",
-        username: "demo.reader",
-        password: "Demo-DB#2026",
-        category: "工作 / 示例项目",
-        tags: &["数据库", "只读"],
-    },
-    Record {
-        title: "个人邮箱示例",
-        username: "demo.mail@example.invalid",
-        password: "Demo-Mail@2026",
-        category: "个人",
-        tags: &["网页", "邮箱"],
-    },
-    Record {
-        title: "特殊字符测试",
-        username: "demo.unicode",
-        password: "示例!@#€🔒",
-        category: "测试",
-        tags: &["测试", "特殊字符"],
-    },
-];
-
-pub fn search(query: &str, category: &str, tag: &str) -> Vec<usize> {
-    let tokens: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    DEMO.iter()
-        .enumerate()
-        .filter_map(|(i, record)| {
-            if !category.is_empty() && record.category != category {
-                return None;
-            }
-            if !tag.is_empty() && !record.tags.contains(&tag) {
-                return None;
-            }
-            let searchable = format!(
-                "{} {} {} {}",
-                record.title,
-                record.username,
-                record.category,
-                record.tags.join(" ")
-            )
-            .to_lowercase();
-            tokens
-                .iter()
-                .all(|token| searchable.contains(token))
-                .then_some(i)
-        })
-        .collect()
-}
 
 pub fn input_units(text: &str) -> Result<Vec<u16>, &'static str> {
     if text.is_empty() || text.chars().any(char::is_control) {
@@ -153,14 +80,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_combines_words_across_public_fields_and_ignores_case() {
-        assert_eq!(search("  ATRUST   客户端  ", "", ""), vec![1]);
-        assert_eq!(search("示例 数据库", "工作 / 示例项目", "只读"), vec![2]);
-        assert!(search("数据库", "个人", "").is_empty());
-        assert!(search("", "", "不存在").is_empty());
-    }
-
-    #[test]
     fn fill_modes_keep_fields_separate_and_validate_before_sending() {
         assert_eq!(
             fill_plan("user", "密码", FillMode::Password).unwrap(),
@@ -183,12 +102,6 @@ mod tests {
         );
         assert!(fill_plan("user", "bad\n", FillMode::Both).is_err());
         assert!(fill_plan("bad\t", "pass", FillMode::Both).is_err());
-    }
-
-    #[test]
-    fn passwords_are_never_searchable() {
-        assert!(search("Demo-Web!2026", "", "").is_empty());
-        assert_eq!(search("", "", "").len(), DEMO.len());
     }
 
     #[test]

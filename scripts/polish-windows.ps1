@@ -12,6 +12,7 @@ public static class PolishNative {
  [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
  [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h,IntPtr dc);
  [DllImport("gdi32.dll")] public static extern uint GetPixel(IntPtr dc,int x,int y);
+ [DllImport("gdi32.dll")] public static extern uint SetPixel(IntPtr dc,int x,int y,uint color);
 }
 public class PolishReceiver:Form {
  public int Hotkeys;
@@ -142,7 +143,20 @@ try{
   $combo=@(Visible (Main) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::ComboBox)|Where-Object{$_.Current.Name -eq '外观配色'})[0]
   $combo.SetFocus();Send '{UP}{UP}{UP}{UP}'
   for($i=0;$i -lt $theme[0];$i++){Send '{DOWN}'}
-  Button '保存设置';Assert ((Get-Content -Raw (Join-Path $DataDir 'theme.txt')).Trim() -eq $theme[1]) "Theme save failed: $($theme[1])"
+  if($theme[0] -eq 2){
+   $handle=[IntPtr](Main).Current.NativeWindowHandle
+   $dc=[PolishNative]::GetDC($handle)
+   try{
+    $before=[PolishNative]::GetPixel($dc,85,5)
+    Assert ($before -ne 0xffffff -and $before -ne [uint32]::MaxValue) 'Settings background probe is unavailable'
+    # Simulate a white patch in the backing surface outside the controls that change colors.
+    Assert ([PolishNative]::SetPixel($dc,85,5,0xffffff) -eq 0xffffff) 'Could not write the background probe'
+    Button '保存设置'
+    $after=[PolishNative]::GetPixel($dc,85,5)
+    Assert ($after -ne 0xffffff -and $after -ne [uint32]::MaxValue) 'Saving the palette left a white background pixel'
+   }finally{[PolishNative]::ReleaseDC($handle,$dc)|Out-Null}
+  }else{Button '保存设置'}
+  Assert ((Get-Content -Raw (Join-Path $DataDir 'theme.txt')).Trim() -eq $theme[1]) "Theme save failed: $($theme[1])"
   $button=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '保存设置')[0].Current.BoundingRectangle
   $dc=[PolishNative]::GetDC([IntPtr]::Zero);try{$pixel=[PolishNative]::GetPixel($dc,[int]($button.Left+8),[int]($button.Top+$button.Height/2))}finally{[PolishNative]::ReleaseDC([IntPtr]::Zero,$dc)|Out-Null}
   $expected=@(0x5f6711,0xb05d24,0xa64370,0x645245)[$theme[0]]

@@ -32,12 +32,14 @@ def build(build_root, test=False):
                  f'-DICON={PROJECT / "assets/keyisle.ico"}',
                  f'-DBANNER={PROJECT / "assets/keyisle-installer.bmp"}',
                  f'-DREADME={PROJECT / "README.md"}',
+                 f'-DREADME_ZH={PROJECT / "README.zh-CN.md"}',
+                 f'-DLICENSE={PROJECT / "LICENSE"}',
                  f'-DNOTICES={PROJECT / "THIRD-PARTY-NOTICES.txt"}']
     if test:
         arguments.append('-DTEST_MODE')
     arguments.append(str(PROJECT / 'installer/keyisle.nsi'))
-    inputs = ['dist/windows-password-manager.exe', 'README.md', 'THIRD-PARTY-NOTICES.txt',
-              'installer/keyisle.nsi', 'assets/keyisle.ico', 'assets/keyisle-installer.bmp']
+    inputs = ['dist/windows-password-manager.exe', 'README.md', 'README.zh-CN.md', 'LICENSE',
+              'THIRD-PARTY-NOTICES.txt', 'installer/keyisle.nsi', 'assets/keyisle.ico', 'assets/keyisle-installer.bmp']
     before = {name: hashlib.sha256((PROJECT / name).read_bytes()).hexdigest() for name in inputs}
     subprocess.run(arguments, env=environment, check=True)
     after = {name: hashlib.sha256((PROJECT / name).read_bytes()).hexdigest() for name in inputs}

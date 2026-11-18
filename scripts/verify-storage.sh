@@ -9,7 +9,7 @@ export XWIN_ARCH=x86_64
 export CARGO_BUILD_JOBS=4
 export SQLCIPHER_STATIC=1
 export PATH="$build_root/tools:$PATH"
-export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static"
+export CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static --remap-path-prefix=$CARGO_HOME/registry/src/=/cargo/ --remap-path-prefix=$CARGO_TARGET_DIR/=/target/ --remap-path-prefix=$PWD=/keyisle/"
 cargo test --locked --release --lib
 cargo build --locked --release --example storage-check
 source scripts/prepare-sqlcipher.sh

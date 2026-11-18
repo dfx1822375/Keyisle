@@ -4,7 +4,7 @@ use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEve
 use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, VecDeque},
+    collections::VecDeque,
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -16,14 +16,34 @@ use std::{
 };
 use windows_password_manager::{
     FillMode, InputUnit, fill_plan, maintenance,
-    security::{Grant, IdleSource, LOCK_MINUTES, LockClock, LockSettings, ProtectedAction},
+    security::{
+        Grant, IdleSource, LOCK_MINUTES, LockClock, LockSettings, ProtectedAction,
+        generate_password,
+    },
     session::Session,
     shortcut::Shortcut,
     startup,
+    update::{self, CheckOutcome, PreparedUpdate, UpdateManifest},
     vault::{Credential, Vault},
 };
 use zeroize::Zeroizing;
 slint::include_modules!();
+
+#[derive(Clone)]
+struct JobDispatcher {
+    sender: mpsc::Sender<JobResult>,
+    ui: slint::Weak<AppWindow>,
+}
+
+impl JobDispatcher {
+    fn send(&self, job: JobResult) {
+        if self.sender.send(job).is_ok() {
+            let _ = self.ui.upgrade_in_event_loop(|ui| {
+                ui.invoke_process_jobs();
+            });
+        }
+    }
+}
 
 struct Pending {
     target: Target,
@@ -36,6 +56,7 @@ struct Pending {
     record: i64,
     application: String,
 }
+
 struct State {
     session: Rc<RefCell<Session>>,
     panel: usize,
@@ -70,6 +91,10 @@ fn window_id(ui: &AppWindow) -> Result<usize, String> {
     }
 }
 
+fn reset_secret_masks(ui: &AppWindow) {
+    ui.set_secret_serial(ui.get_secret_serial().wrapping_add(1));
+}
+
 fn clear_editor(ui: &AppWindow) {
     ui.set_editing(false);
     ui.set_edit_dirty(false);
@@ -82,6 +107,7 @@ fn clear_editor(ui: &AppWindow) {
     ui.set_edit_url("".into());
     ui.set_edit_notes("".into());
     ui.set_edit_sensitive(false);
+    reset_secret_masks(ui);
 }
 
 fn clear_details(ui: &AppWindow) {
@@ -93,6 +119,7 @@ fn clear_details(ui: &AppWindow) {
     ui.set_details_tags("".into());
     ui.set_details_url("".into());
     ui.set_details_notes("".into());
+    reset_secret_masks(ui);
 }
 
 fn clear_maintenance(ui: &AppWindow) {
@@ -103,6 +130,7 @@ fn clear_maintenance(ui: &AppWindow) {
     ui.set_current_master("".into());
     ui.set_new_master("".into());
     ui.set_new_confirmation("".into());
+    reset_secret_masks(ui);
 }
 
 fn clear_backup_list(ui: &AppWindow) {
@@ -111,6 +139,7 @@ fn clear_backup_list(ui: &AppWindow) {
     ui.set_backup_confirm_mode(0);
     ui.set_selected_backup(-1);
     ui.set_backup_rows(ModelRc::new(VecModel::from(Vec::<BackupRow>::new())));
+    reset_secret_masks(ui);
 }
 
 fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
@@ -120,6 +149,7 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
         .cloned();
     let session = state.session.borrow();
     let backups = maintenance::backup_list(&session.root, &session.path)?;
+    let inactive = maintenance::inactive_vault_count(&session.root, &session.path);
     let rows: Vec<_> = backups
         .iter()
         .map(|entry| BackupRow {
@@ -135,6 +165,7 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
     state.backup_paths = backups.into_iter().map(|b| b.path).collect();
     ui.set_backup_rows(ModelRc::new(VecModel::from(rows)));
     ui.set_backup_count(state.backup_paths.len() as i32);
+    ui.set_inactive_vault_count(inactive as i32);
     ui.set_selected_backup(if state.backup_paths.is_empty() {
         -1
     } else {
@@ -144,24 +175,40 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
     });
     ui.set_backup_confirm_mode(0);
     ui.set_backup_master("".into());
+    reset_secret_masks(ui);
     Ok(())
+}
+
+fn rich_markup(color: &str, query: &str, text: &str) -> Option<String> {
+    if query.trim().is_empty() || text.is_empty() {
+        return None;
+    }
+    let spans = windows_password_manager::search::highlights(query, text);
+    if !spans.iter().any(|(_, hit)| *hit) {
+        return None;
+    }
+    Some(
+        spans
+            .into_iter()
+            .map(|(part, hit)| {
+                let escaped = windows_password_manager::search::highlighted_markdown("", &part);
+                if hit {
+                    format!("<font color=\"{color}\">**{escaped}**</font>")
+                } else {
+                    escaped
+                }
+            })
+            .collect(),
+    )
 }
 
 fn rich(ui: &AppWindow, query: &str, text: &str) -> slint::StyledText {
     let color = ui.get_match_color();
-    let markup = windows_password_manager::search::highlights(query, text)
-        .into_iter()
-        .map(|(part, hit)| {
-            let escaped = windows_password_manager::search::highlighted_markdown("", &part);
-            if hit {
-                format!("<font color=\"{color}\">**{escaped}**</font>")
-            } else {
-                escaped
-            }
-        })
-        .collect::<String>();
-    slint::StyledText::from_markdown(&markup)
-        .unwrap_or_else(|_| slint::StyledText::from_plain_text(text))
+    match rich_markup(color.as_str(), query, text) {
+        Some(markup) => slint::StyledText::from_markdown(&markup)
+            .unwrap_or_else(|_| slint::StyledText::from_plain_text(text)),
+        None => slint::StyledText::from_plain_text(text),
+    }
 }
 
 fn success(ui: &AppWindow, message: String) {
@@ -184,7 +231,7 @@ fn success(ui: &AppWindow, message: String) {
 
 fn refresh(ui: &AppWindow, state: &mut State) {
     let previously_selected = selected_id(ui, state);
-    let session = state.session.borrow();
+    let mut session = state.session.borrow_mut();
     ui.set_blocked(session.working || session.auth_owner.is_some());
     let settings = state.clock.settings();
     ui.set_policy_label(
@@ -204,34 +251,9 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     ui.set_new_vault(!session.path.exists());
     ui.set_vault_path(session.path.to_string_lossy().as_ref().into());
     state.matches.clear();
-    let records = match session.vault.as_ref().map(|v| v.list()).transpose() {
-        Ok(records) => records.unwrap_or_default(),
-        Err(message) => {
-            ui.set_status(message.into());
-            Vec::new()
-        }
-    };
-    let mut categories = BTreeSet::new();
-    let mut tags = BTreeSet::new();
-    let mut rows = Vec::new();
-    for record in &records {
-        if !record.category.is_empty() {
-            categories.insert(record.category.clone());
-        }
-        for tag in record
-            .tags
-            .split([',', '，', ';', '；'])
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            tags.insert(tag.to_owned());
-        }
-    }
-    if !categories.contains(ui.get_category().as_str()) {
-        ui.set_category("".into());
-    }
-    if !tags.contains(ui.get_tag().as_str()) {
-        ui.set_tag("".into());
+
+    if let Err(message) = session.ensure_cache() {
+        ui.set_status(message.into());
     }
     let application_usage = session
         .vault
@@ -243,18 +265,44 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             None
         })
         .unwrap_or_default();
-    let mut ranked: Vec<_> = records
-        .into_iter()
-        .filter_map(|record| {
-            record
-                .rank(
-                    ui.get_query().as_str(),
-                    ui.get_category().as_str(),
-                    ui.get_tag().as_str(),
-                )
-                .map(|score| (score, record))
-        })
-        .collect();
+
+    let (categories, tags, mut ranked) = if let Some(cache) = session.cache.as_ref() {
+        if !cache
+            .categories
+            .iter()
+            .any(|c| c == ui.get_category().as_str())
+        {
+            ui.set_category("".into());
+        }
+        if !cache.tags.iter().any(|t| t == ui.get_tag().as_str()) {
+            ui.set_tag("".into());
+        }
+        let query_str = ui.get_query();
+        let cat_str = ui.get_category();
+        let tag_str = ui.get_tag();
+        let ranked: Vec<_> = cache
+            .entries
+            .iter()
+            .filter_map(|(record, prepared)| {
+                prepared
+                    .rank(
+                        record,
+                        query_str.as_str(),
+                        cat_str.as_str(),
+                        tag_str.as_str(),
+                    )
+                    .map(|score| (score, record.clone()))
+            })
+            .collect();
+        (cache.categories.clone(), cache.tags.clone(), ranked)
+    } else {
+        ui.set_category("".into());
+        ui.set_tag("".into());
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    let unlocked = session.vault.is_some();
+    drop(session);
+
     ranked.sort_by(|(a_score, a), (b_score, b)| {
         b_score
             .cmp(a_score)
@@ -269,10 +317,14 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             .then_with(|| a.title.cmp(&b.title))
             .then(a.id.cmp(&b.id))
     });
+
+    let query = ui.get_query();
+    let has_query = !query.trim().is_empty();
+    let color = ui.get_match_color();
+    let mut rows = Vec::with_capacity(ranked.len());
     for (_, record) in ranked {
         state.matches.push(record.id);
-        let query = ui.get_query();
-        let title = if record.sensitive {
+        let accessible_title = if record.sensitive {
             format!("敏感 · {}", record.title)
         } else {
             record.title.clone()
@@ -283,30 +335,36 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             record.username.clone()
         };
         let matched = |value: &str| {
-            windows_password_manager::search::highlights(query.as_str(), value)
-                .iter()
-                .any(|(_, hit)| *hit)
+            has_query
+                && !value.is_empty()
+                && windows_password_manager::search::highlights(query.as_str(), value)
+                    .iter()
+                    .any(|(_, hit)| *hit)
         };
+        let cat_hit = matched(&record.category);
+        let tag_hit = matched(&record.tags);
+        let url_hit = matched(&record.url);
+
         let mut detail = [&record.category, &record.tags]
             .into_iter()
             .filter(|value| !value.is_empty())
             .cloned()
             .collect::<Vec<_>>()
             .join(" · ");
-        if matched(&record.url) {
+        if url_hit {
             if !detail.is_empty() {
                 detail.push_str(" · ");
             }
             detail.push_str(&format!("网址：{}", record.url));
         }
         let source = [
-            ("分类", &record.category),
-            ("标签", &record.tags),
-            ("网址", &record.url),
+            ("分类", &record.category, cat_hit),
+            ("标签", &record.tags, tag_hit),
+            ("网址", &record.url, url_hit),
         ]
         .into_iter()
-        .filter(|(_, value)| matched(value))
-        .map(|(label, value)| format!("{label}：{value}"))
+        .filter(|(_, _, hit)| *hit)
+        .map(|(label, value, _)| format!("{label}：{value}"))
         .collect::<Vec<_>>()
         .join(" · ");
         let hint = if source.is_empty() {
@@ -314,19 +372,38 @@ fn refresh(ui: &AppWindow, state: &mut State) {
         } else {
             format!("{username} · {source}")
         };
+        let hint_rich = if record.sensitive {
+            if source.is_empty() {
+                slint::StyledText::from_plain_text(&username)
+            } else {
+                let source_md = rich_markup(color.as_str(), query.as_str(), &source)
+                    .unwrap_or_else(|| {
+                        windows_password_manager::search::highlighted_markdown("", &source)
+                    });
+                let prefix = windows_password_manager::search::highlighted_markdown(
+                    "",
+                    &format!("{username} · "),
+                );
+                slint::StyledText::from_markdown(&format!("{prefix}{source_md}"))
+                    .unwrap_or_else(|_| slint::StyledText::from_plain_text(&hint))
+            }
+        } else {
+            rich(ui, query.as_str(), &hint)
+        };
         rows.push(EntryRow {
-            title_rich: rich(ui, query.as_str(), &title),
+            title_rich: rich(ui, query.as_str(), &record.title),
             user_rich: if record.sensitive {
                 slint::StyledText::from_plain_text(&username)
             } else {
                 rich(ui, query.as_str(), &username)
             },
             detail_rich: rich(ui, query.as_str(), &detail),
-            hint_rich: rich(ui, query.as_str(), &hint),
+            hint_rich,
             hint: hint.into(),
-            title: title.into(),
+            title: accessible_title.into(),
             username: username.into(),
             detail: detail.into(),
+            sensitive: record.sensitive,
         });
     }
     ui.set_categories(ModelRc::new(VecModel::from(
@@ -359,12 +436,13 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     );
     ui.invoke_scroll_selected();
     ui.set_delete_confirm(false);
-    if session.vault.is_none() {
+    if !unlocked {
         clear_editor(ui);
         clear_details(ui);
         state.details_id = None;
         ui.set_master("".into());
         ui.set_confirmation("".into());
+        reset_secret_masks(ui);
         ui.set_can_fill(false);
     }
 }
@@ -389,6 +467,83 @@ enum JobResult {
         generation: u64,
         result: Result<(), String>,
     },
+    UpdateCheck {
+        serial: u64,
+        manual: bool,
+        result: Result<CheckOutcome, String>,
+    },
+    UpdateProgress {
+        serial: u64,
+        received: u64,
+        total: u64,
+    },
+    UpdatePrepared {
+        serial: u64,
+        result: Result<PreparedUpdate, String>,
+    },
+}
+
+struct UpdateController {
+    available: Option<UpdateManifest>,
+    busy: bool,
+    cancel: Arc<AtomicBool>,
+    serial: u64,
+    pending_launch: Option<PreparedUpdate>,
+}
+
+fn schedule_clipboard_clear(seq: &Rc<Cell<u32>>, timer: &Rc<Timer>, delay: Duration) {
+    timer.stop();
+    if delay.is_zero() && platform::clear_clipboard_if_matches(seq.get()) {
+        seq.set(0);
+        return;
+    }
+    let seq = seq.clone();
+    let timer_weak = Rc::downgrade(timer);
+    let deadline = Instant::now() + delay;
+    timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
+        if Instant::now() >= deadline && platform::clear_clipboard_if_matches(seq.get()) {
+            seq.set(0);
+            if let Some(timer) = timer_weak.upgrade() {
+                timer.stop();
+            }
+        }
+    });
+}
+
+fn start_update_check(
+    main: &AppWindow,
+    ctrl: &RefCell<UpdateController>,
+    jobs: &JobDispatcher,
+    manual: bool,
+) {
+    let mut c = ctrl.borrow_mut();
+    if c.busy {
+        return;
+    }
+    c.serial = c.serial.wrapping_add(1);
+    let serial = c.serial;
+    let cancel = Arc::new(AtomicBool::new(false));
+    c.cancel = cancel.clone();
+    c.busy = true;
+    drop(c);
+
+    main.set_update_checking(true);
+    if manual {
+        main.set_update_error("".into());
+        main.set_update_status("".into());
+        if main.get_settings_open() {
+            main.set_status("".into());
+        }
+    }
+    let jobs = jobs.clone();
+    std::thread::spawn(move || {
+        let result = update::check_for_updates(&cancel);
+        jobs.send(JobResult::UpdateCheck {
+            serial,
+            manual,
+            result,
+        });
+    });
 }
 
 fn cancel_auth(ui: &AppWindow, state: &mut State) {
@@ -402,6 +557,7 @@ fn cancel_auth(ui: &AppWindow, state: &mut State) {
     ui.set_verification_active(false);
     ui.set_verify_master("".into());
     ui.set_verification_label("".into());
+    reset_secret_masks(ui);
 }
 
 fn available(state: &State) -> bool {
@@ -442,6 +598,7 @@ fn authorize(ui: &AppWindow, state: &mut State, action: ProtectedAction) -> bool
     state.auth_cancel = Arc::new(AtomicBool::new(false));
     state.requested = Some((action, generation, Instant::now()));
     state.session.borrow_mut().auth_owner = Some(state.panel);
+    reset_secret_masks(ui);
     ui.set_verification_active(true);
     ui.set_verify_source(0);
     ui.set_verify_master("".into());
@@ -468,21 +625,28 @@ fn guard_editor(ui: &AppWindow, action: i32) -> bool {
     }
 }
 
-fn hide_window(ui: &AppWindow) -> Result<(), String> {
+fn hide_window(ui: &AppWindow, popup_watch: Option<&Timer>) -> Result<(), String> {
     if ui.get_compact() {
+        if let Some(watch) = popup_watch {
+            watch.stop();
+        }
         let _ = platform::watch_popup(None);
     }
     ui.hide().map_err(|error| error.to_string())
 }
-fn show_window(ui: &AppWindow) -> Result<(), String> {
+
+fn show_window(ui: &AppWindow, popup_watch: Option<&Timer>) -> Result<(), String> {
     ui.show().map_err(|error| error.to_string())?;
     if ui.get_compact() {
         platform::watch_popup(Some(window_id(ui)?))?;
+        if let Some(watch) = popup_watch {
+            watch.restart();
+        }
     }
     Ok(())
 }
 
-fn cancel(ui: &AppWindow, state: &mut State, timer: &Timer) {
+fn cancel(ui: &AppWindow, state: &mut State, timer: &Timer, popup_watch: Option<&Timer>) {
     state.clock.touch();
     timer.stop();
     cancel_auth(ui, state);
@@ -504,10 +668,10 @@ fn cancel(ui: &AppWindow, state: &mut State, timer: &Timer) {
     ui.set_master("".into());
     ui.set_confirmation("".into());
     clear_editor(ui);
-    let _ = hide_window(ui);
+    let _ = hide_window(ui, popup_watch);
 }
 
-fn report(ui: &AppWindow, state: &mut State, message: String) {
+fn report(ui: &AppWindow, state: &mut State, message: String, popup_watch: Option<&Timer>) {
     state.pending = None;
     state.target = None;
     ui.set_busy(false);
@@ -515,7 +679,7 @@ fn report(ui: &AppWindow, state: &mut State, message: String) {
     ui.set_status(message.into());
     ui.set_target_label("本次填充已取消；请重新点击输入框并按呼出快捷键。".into());
     ui.set_target_detail("".into());
-    let _ = show_window(ui);
+    let _ = show_window(ui, popup_watch);
     if let Ok(window) = window_id(ui) {
         platform::activate(window);
     }
@@ -525,12 +689,23 @@ fn report(ui: &AppWindow, state: &mut State, message: String) {
 fn bind(
     ui: &AppWindow,
     session: Rc<RefCell<Session>>,
-    jobs: mpsc::Sender<JobResult>,
+    jobs: JobDispatcher,
     clock: Arc<LockClock>,
     panel: usize,
     lock_signal: Arc<AtomicBool>,
+    popup_watch: Option<Rc<Timer>>,
+    clipboard_seq: Rc<Cell<u32>>,
+    clipboard_timer: Rc<Timer>,
 ) -> (Rc<RefCell<State>>, Rc<Timer>) {
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_install_mode_label(
+        if update::is_installed_mode() {
+            "安装版"
+        } else {
+            "便携版"
+        }
+        .into(),
+    );
     let state = Rc::new(RefCell::new(State {
         session: session.clone(),
         panel,
@@ -564,6 +739,16 @@ fn bind(
     }
     {
         let weak = ui.as_weak();
+        ui.on_open_release_page(move || {
+            if let Some(ui) = weak.upgrade() {
+                if let Err(message) = platform::open_web_url(update::RELEASE_PAGE_URL) {
+                    ui.set_update_error(message.into());
+                }
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
         let state = state.clone();
         ui.on_open_about(move || {
             if let Some(ui) = weak.upgrade() {
@@ -585,6 +770,9 @@ fn bind(
         let weak = ui.as_weak();
         ui.on_close_about(move || {
             if let Some(ui) = weak.upgrade() {
+                if ui.get_update_installing() {
+                    return;
+                }
                 ui.set_about_open(false);
                 ui.set_settings_open(ui.get_about_from_settings() && ui.get_unlocked());
                 ui.invoke_focus_search();
@@ -622,6 +810,7 @@ fn bind(
         let weak = ui.as_weak();
         let state = state.clone();
         let timer = timer.clone();
+        let watch = popup_watch.clone();
         ui.on_cancel(move || {
             if let Some(ui) = weak.upgrade() {
                 if ui.get_working() && !ui.get_compact() {
@@ -642,7 +831,7 @@ fn bind(
                 if guard_editor(&ui, 2) {
                     return;
                 }
-                cancel(&ui, &mut state.borrow_mut(), &timer);
+                cancel(&ui, &mut state.borrow_mut(), &timer, watch.as_deref());
                 ui.invoke_session_changed();
             }
         });
@@ -660,10 +849,26 @@ fn bind(
         let weak = ui.as_weak();
         ui.on_exit_app(move || {
             if let Some(ui) = weak.upgrade() {
+                let surface_blocked_window = |ui: &AppWindow| {
+                    if !ui.get_compact() {
+                        if !ui.window().is_visible() {
+                            let _ = show_window(ui, None);
+                        }
+                        ui.window().with_winit_window(|window| {
+                            window.set_minimized(false);
+                        });
+                        ui.window().set_minimized(false);
+                        if let Ok(hwnd) = window_id(ui) {
+                            platform::activate(hwnd);
+                        }
+                    }
+                };
                 if ui.get_working() {
+                    surface_blocked_window(&ui);
                     return;
                 }
                 if guard_editor(&ui, 3) {
+                    surface_blocked_window(&ui);
                     return;
                 }
             }
@@ -674,6 +879,7 @@ fn bind(
         let weak = ui.as_weak();
         let state = state.clone();
         let timer = timer.clone();
+        let watch = popup_watch.clone();
         ui.on_finish_discard(move |discard| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -691,11 +897,15 @@ fn bind(
             state.borrow_mut().editor_verified = None;
             match action {
                 2 => {
-                    cancel(&ui, &mut state.borrow_mut(), &timer);
+                    cancel(&ui, &mut state.borrow_mut(), &timer, watch.as_deref());
                     ui.invoke_session_changed();
                 }
                 3 => {
                     let _ = slint::quit_event_loop();
+                }
+                4 => {
+                    ui.set_about_open(true);
+                    ui.invoke_install_update();
                 }
                 _ => {
                     ui.set_status("已放弃未保存的修改。".into());
@@ -721,6 +931,7 @@ fn bind(
             let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
             ui.set_master("".into());
             ui.set_confirmation("".into());
+            reset_secret_masks(&ui);
             if creating && master.as_str() != confirmation.as_str() {
                 ui.set_status("两次主密码不一致，请重新输入。".into());
                 return;
@@ -750,7 +961,7 @@ fn bind(
                         vault.check()?;
                         Ok(vault)
                     });
-                let _ = jobs.send(JobResult::Unlock(generation, result));
+                jobs.send(JobResult::Unlock(generation, result));
             });
         });
     }
@@ -776,6 +987,27 @@ fn bind(
             ui.set_status("".into());
             ui.set_editing(true);
             ui.invoke_focus_search();
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_generate_password(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if !ui.get_editing() || ui.get_ui_blocked() {
+                return;
+            }
+            state.borrow().clock.touch();
+            match generate_password(20, true) {
+                Ok(generated) => {
+                    ui.set_edit_password(generated.as_str().into());
+                    ui.set_edit_dirty(true);
+                    success(&ui, "已生成 20 位高强度随机密码，保存账号后生效。".into());
+                }
+                Err(message) => ui.set_status(message.into()),
+            }
         });
     }
     {
@@ -817,6 +1049,7 @@ fn bind(
                     ui.set_details_tags(record.tags.into());
                     ui.set_details_url(record.url.into());
                     ui.set_details_notes(record.notes.into());
+                    reset_secret_masks(&ui);
                     ui.set_status("".into());
                     ui.set_details_open(true);
                     ui.invoke_focus_search();
@@ -825,6 +1058,48 @@ fn bind(
             }
         });
     }
+    for copy_secret in [false, true] {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let seq_cell = clipboard_seq.clone();
+        let timer_ref = clipboard_timer.clone();
+        let handler = move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if !ui.get_details_open()
+                || !available(&state.borrow())
+                || state.borrow().details_id.is_none()
+            {
+                return;
+            }
+            state.borrow().clock.touch();
+            let value = Zeroizing::new(if copy_secret {
+                ui.get_details_password().to_string()
+            } else {
+                ui.get_details_user().to_string()
+            });
+            let result =
+                window_id(&ui).and_then(|owner| platform::copy_protected_text(owner, &value));
+            match result {
+                Ok(seq) => {
+                    seq_cell.set(seq);
+                    schedule_clipboard_clear(&seq_cell, &timer_ref, Duration::from_secs(15));
+                    let label = if copy_secret { "密码" } else { "用户名" };
+                    success(
+                        &ui,
+                        format!("已临时复制{label}（已排除剪贴板历史，15 秒后或锁库自动清除）。"),
+                    );
+                }
+                Err(message) => ui.set_status(message.into()),
+            }
+        };
+        if copy_secret {
+            ui.on_copy_details_password(handler);
+        } else {
+            ui.on_copy_details_user(handler);
+        }
+    }
     {
         let weak = ui.as_weak();
         let state = state.clone();
@@ -832,6 +1107,7 @@ fn bind(
             if let Some(ui) = weak.upgrade() {
                 clear_details(&ui);
                 state.borrow_mut().details_id = None;
+                ui.set_status("".into());
                 ui.invoke_focus_search();
             }
         });
@@ -884,6 +1160,7 @@ fn bind(
                 .and_then(|v| v.get(id));
             match record {
                 Ok(record) => {
+                    clear_editor(&ui);
                     state.editing_id = record.id;
                     ui.set_edit_sensitive(record.sensitive);
                     ui.set_edit_title(record.title.into());
@@ -893,6 +1170,7 @@ fn bind(
                     ui.set_edit_tags(record.tags.into());
                     ui.set_edit_url(record.url.into());
                     ui.set_edit_notes(record.notes.into());
+                    reset_secret_masks(&ui);
                     ui.set_status("".into());
                     ui.set_edit_is_new(false);
                     ui.set_edit_dirty(false);
@@ -936,7 +1214,7 @@ fn bind(
                 password: Zeroizing::new(ui.get_edit_password().to_string()),
                 category: ui.get_edit_category().trim().to_owned(),
                 tags: ui.get_edit_tags().to_string(),
-                url: ui.get_edit_url().to_string(),
+                url: ui.get_edit_url().trim().to_owned(),
                 notes: ui.get_edit_notes().to_string(),
                 sensitive: ui.get_edit_sensitive(),
             };
@@ -960,6 +1238,7 @@ fn bind(
                     .as_mut()
                     .ok_or("密码库已锁定。".to_string())?
                     .save(&record)?;
+                session.invalidate_cache();
                 Ok::<_, String>(id)
             })();
             match result {
@@ -1030,7 +1309,9 @@ fn bind(
                     .vault
                     .as_mut()
                     .ok_or("密码库已锁定。".to_string())?
-                    .delete(state.deleting_id)
+                    .delete(state.deleting_id)?;
+                session.invalidate_cache();
+                Ok::<_, String>(())
             })();
             drop(state);
             match result {
@@ -1089,6 +1370,7 @@ fn bind(
             };
             let master = Zeroizing::new(ui.get_verify_master().to_string());
             ui.set_verify_master("".into());
+            reset_secret_masks(&ui);
             if method == 0 && master.is_empty() {
                 ui.set_status("请输入所选验证方式对应的密码。".into());
                 return;
@@ -1124,7 +1406,7 @@ fn bind(
                 None
             };
             let reply = move |result| {
-                let _ = jobs.send(JobResult::Verify {
+                jobs.send(JobResult::Verify {
                     panel,
                     serial,
                     generation,
@@ -1158,7 +1440,8 @@ fn bind(
             if !available(&state.borrow()) {
                 return;
             }
-            let shortcut = Shortcut::load(&state.borrow().session.borrow().root);
+            let root = state.borrow().session.borrow().root.clone();
+            let shortcut = Shortcut::load(&root);
             match shortcut {
                 Ok(shortcut) => ui.set_shortcut_input(shortcut.to_string().into()),
                 Err(message) => {
@@ -1166,12 +1449,24 @@ fn bind(
                     return;
                 }
             }
-            let settings = state.borrow().clock.settings();
-            let launch = {
-                let state = state.borrow();
-                startup::load_tray(&state.session.borrow().root)
-                    .and_then(|tray| startup::enabled().map(|enabled| (tray, enabled)))
+            let screen_protection =
+                match windows_password_manager::settings::load_screen_protection(&root) {
+                    Ok(enabled) => enabled,
+                    Err(message) => {
+                        ui.set_status(message.into());
+                        return;
+                    }
+                };
+            let auto_update = match windows_password_manager::settings::load_auto_update(&root) {
+                Ok(enabled) => enabled,
+                Err(message) => {
+                    ui.set_status(message.into());
+                    return;
+                }
             };
+            let settings = state.borrow().clock.settings();
+            let launch = startup::load_tray(&root)
+                .and_then(|tray| startup::enabled().map(|enabled| (tray, enabled)));
             match launch {
                 Ok((tray, enabled)) => {
                     ui.set_start_in_tray(tray);
@@ -1195,6 +1490,8 @@ fn bind(
             });
             ui.set_theme_choice(ui.get_theme_index());
             ui.set_appearance_choice(ui.get_appearance_mode());
+            ui.set_screen_protection_choice(screen_protection);
+            ui.set_auto_update_choice(auto_update);
             ui.set_settings_open(true);
             ui.set_status("".into());
             state.borrow().clock.touch();
@@ -1233,13 +1530,10 @@ fn bind(
             if !available(&state.borrow()) {
                 return;
             }
-            let result = refresh_backups(&ui, &mut state.borrow_mut());
-            ui.set_status(
-                result
-                    .map(|_| "备份列表已刷新。".to_string())
-                    .unwrap_or_else(|e| e)
-                    .into(),
-            );
+            match refresh_backups(&ui, &mut state.borrow_mut()) {
+                Ok(()) => success(&ui, "备份列表已刷新。".into()),
+                Err(message) => ui.set_status(message.into()),
+            }
             state.borrow().clock.touch();
         });
     }
@@ -1278,6 +1572,7 @@ fn bind(
             if ui.get_backup_confirm_mode() != mode {
                 ui.set_backup_confirm_mode(mode);
                 ui.set_backup_master("".into());
+                reset_secret_masks(&ui);
                 ui.set_status(
                     format!("选中：{}", source.file_name().unwrap().to_string_lossy()).into(),
                 );
@@ -1287,6 +1582,7 @@ fn bind(
             }
             let master = Zeroizing::new(ui.get_backup_master().to_string());
             ui.set_backup_master("".into());
+            reset_secret_masks(&ui);
             if master.is_empty() {
                 ui.set_status("请输入本次操作所需的主密码。".into());
                 return;
@@ -1313,7 +1609,7 @@ fn bind(
                     maintenance::delete_backup(&root, &active, &source, &master, &cancel)
                         .map(|_| None)
                 };
-                let _ = jobs.send(JobResult::Backup { generation, result });
+                jobs.send(JobResult::Backup { generation, result });
             });
         };
         if restore {
@@ -1336,8 +1632,10 @@ fn bind(
             let session = state.session.borrow();
             match maintenance::local_backups(&session.root, &session.path) {
                 Ok(paths) => {
+                    let inactive = maintenance::inactive_vault_count(&session.root, &session.path);
                     clear_maintenance(&ui);
                     ui.set_backup_count(paths.len() as i32);
+                    ui.set_inactive_vault_count(inactive as i32);
                     ui.set_maintenance_open(true);
                     ui.invoke_focus_search();
                     ui.set_status("".into());
@@ -1387,6 +1685,7 @@ fn bind(
                         .into(),
                     );
                     ui.set_reset_master("".into());
+                    reset_secret_masks(&ui);
                     ui.set_reset_confirmed(false);
                     ui.set_reset_incomplete(false);
                     ui.set_status("".into());
@@ -1411,6 +1710,7 @@ fn bind(
             }
             ui.set_reset_open(false);
             ui.set_reset_master("".into());
+            reset_secret_masks(&ui);
             ui.set_reset_confirmed(false);
             ui.set_status("".into());
             state.borrow().clock.touch();
@@ -1432,6 +1732,7 @@ fn bind(
                 ui.set_backups_confirm(true);
                 ui.set_new_master("".into());
                 ui.set_new_confirmation("".into());
+                reset_secret_masks(&ui);
                 ui.set_status("请核对备份数量，输入当前主密码，再确认清除。".into());
                 state.borrow().clock.touch();
                 return;
@@ -1439,6 +1740,7 @@ fn bind(
             let old = Zeroizing::new(ui.get_current_master().to_string());
             let new = Zeroizing::new(ui.get_new_master().to_string());
             let confirmation = Zeroizing::new(ui.get_new_confirmation().to_string());
+            reset_secret_masks(&ui);
             if old.is_empty() {
                 ui.set_status("请输入当前主密码。".into());
                 return;
@@ -1472,7 +1774,7 @@ fn bind(
                 if clear {
                     "正在验证主密码并清除本地备份…"
                 } else {
-                    "正在验证并重新加密密码库和全部本地备份；请勿关闭程序…"
+                    "正在并行验证并重新加密密码库和全部本地备份；请勿关闭程序…"
                 }
                 .into(),
             );
@@ -1487,7 +1789,7 @@ fn bind(
                         format!("主密码已修改，已同步更新 {n} 个本地备份。请输入新主密码解锁。")
                     })
                 };
-                let _ = jobs.send(JobResult::Maintenance(result));
+                jobs.send(JobResult::Maintenance(result));
             });
         };
         if clear {
@@ -1501,6 +1803,7 @@ fn bind(
         let weak = ui.as_weak();
         let state = state.clone();
         let timer = timer.clone();
+        let watch = popup_watch.clone();
         ui.on_fill(move |action| {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1521,12 +1824,17 @@ fn bind(
             let panel = match window_id(&ui) {
                 Ok(panel) => panel,
                 Err(error) => {
-                    report(&ui, &mut current, error);
+                    report(&ui, &mut current, error, watch.as_deref());
                     return;
                 }
             };
             if !platform::is_foreground(panel) {
-                report(&ui, &mut current, "搜索窗口已失去焦点，已取消填充。".into());
+                report(
+                    &ui,
+                    &mut current,
+                    "搜索窗口已失去焦点，已取消填充。".into(),
+                    watch.as_deref(),
+                );
                 return;
             }
             let mode = match action {
@@ -1534,9 +1842,15 @@ fn bind(
                 FillAction::Username => FillMode::Username,
                 FillAction::Both => FillMode::Both,
             };
-            if let Err(message) = target.validate() { report(&ui, &mut current, message); return; }
+            if let Err(message) = target.validate() {
+                report(&ui, &mut current, message, watch.as_deref());
+                return;
+            }
             if !authorize(&ui, &mut current, ProtectedAction::Fill(record, mode)) {
-                drop(current); ui.invoke_session_changed(); ui.invoke_focus_search(); return;
+                drop(current);
+                ui.invoke_session_changed();
+                ui.invoke_focus_search();
+                return;
             }
             current.clock.touch();
             let credential = match current
@@ -1595,6 +1909,7 @@ fn bind(
             let lock_signal = lock_signal.clone();
             let session = current_session(&state);
             let timer_weak = Rc::downgrade(&timer);
+            let watch_inner = watch.clone();
             timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
                 let Some(ui) = weak.upgrade() else {
                     return;
@@ -1613,7 +1928,6 @@ fn bind(
                 let Some(pending) = state.pending.as_mut() else {
                     return;
                 };
-                // shortcut: shared HWNDs expose no field readiness; use 400 ms, add UIA checks if slower clients require them.
                 let outcome = if let Some(tab_sent) = pending.tab_sent {
                     match pending.target.verify_foreground() {
                         Err(error) => Some(Err(error)),
@@ -1621,7 +1935,10 @@ fn bind(
                         Ok(()) => match pending.target.after_tab() {
                             Ok(Some(target)) => Some(target.fill(&pending.password)),
                             Ok(None) if tab_sent.elapsed() < Duration::from_millis(1500) => None,
-                            Ok(None) => Some(Err("Tab 未及时切换到下一输入框，已取消密码填充。请点击密码框后单独填入。".into())),
+                            Ok(None) => Some(Err(
+                                "Tab 未及时切换到下一输入框，已取消密码填充。请点击密码框后单独填入。"
+                                    .into(),
+                            )),
                             Err(message) => Some(Err(message)),
                         },
                     }
@@ -1631,7 +1948,6 @@ fn bind(
                     }
                     match pending.target.fill(&pending.inputs) {
                         Ok(()) if !pending.password.is_empty() => {
-                            // Tab focus changes can be asynchronous; aTrust drops an immediate password batch.
                             pending.tab_sent = Some(Instant::now());
                             None
                         }
@@ -1642,8 +1958,8 @@ fn bind(
                 } else if pending.started.elapsed() > Duration::from_secs(2) {
                     Some(Err("按键未及时释放，已取消填充。".into()))
                 } else if platform::trigger_keys_released() {
-                    // Release Enter while the panel still owns focus, so the target cannot submit on key-up.
-                    match hide_window(&ui).and_then(|_| pending.target.restore())
+                    match hide_window(&ui, watch_inner.as_deref())
+                        .and_then(|_| pending.target.restore())
                     {
                         Ok(()) => {
                             pending.restored = Some(Instant::now());
@@ -1660,9 +1976,17 @@ fn bind(
                     }
                     if result.is_ok() {
                         let record = state.pending.as_ref().unwrap().record;
+                        let app_key = state.pending.as_ref().unwrap().application.clone();
                         let mut session = session.borrow_mut();
-                        if session.vault.as_mut().is_some_and(|vault| vault.record_used_in_application(record, &state.pending.as_ref().unwrap().application).is_err()) {
-                            session.notice=Some("上次填充已完成，但最近使用记录未保存，请检查磁盘空间或权限。".into());
+                        if session.vault.as_mut().is_some_and(|vault| {
+                            vault.record_used_in_application(record, &app_key).is_err()
+                        }) {
+                            session.notice = Some(
+                                "上次填充已完成，但最近使用记录未保存，请检查磁盘空间或权限。"
+                                    .into(),
+                            );
+                        } else {
+                            session.invalidate_cache();
                         }
                     }
                     state.pending = None;
@@ -1670,7 +1994,7 @@ fn bind(
                     ui.set_busy(false);
                     ui.set_can_fill(false);
                     if let Err(error) = result {
-                        report(&ui, &mut state, error);
+                        report(&ui, &mut state, error, watch_inner.as_deref());
                     }
                 }
             });
@@ -1777,12 +2101,13 @@ fn bind(
         let weak = ui.as_weak();
         let state = state.clone();
         ui.on_appearance_changed(move || {
-            // Palette bindings can be evaluated while a list refresh holds the state.
             let weak = weak.clone();
             let state = state.clone();
             Timer::single_shot(Duration::ZERO, move || {
                 if let Some(ui) = weak.upgrade() {
-                    refresh(&ui, &mut state.borrow_mut());
+                    if !ui.get_compact() || ui.window().is_visible() {
+                        refresh(&ui, &mut state.borrow_mut());
+                    }
                 }
             });
         });
@@ -1795,6 +2120,8 @@ fn show_panel(
     ui: &AppWindow,
     state: &RefCell<State>,
     timer: &Timer,
+    popup_watch: Option<&Timer>,
+    screen_protection: bool,
     target: Option<Target>,
 ) -> Result<(), String> {
     timer.stop();
@@ -1850,7 +2177,10 @@ fn show_panel(
         ui.set_status(notice.into());
     }
     if !ui.window().is_visible() {
-        show_window(ui)?;
+        show_window(ui, popup_watch)?;
+    }
+    if let Ok(hwnd) = window_id(ui) {
+        platform::set_screen_protection(hwnd, screen_protection);
     }
     if !ui.get_compact() {
         ui.invoke_restore_layout();
@@ -1859,7 +2189,6 @@ fn show_panel(
         ui.window().set_minimized(false);
         platform::present_popup(window_id(ui)?, target)?;
     } else {
-        // A rapid restore can be overtaken by the pending native minimize command.
         let delay = if ui.window().is_minimized() {
             state
                 .minimized_at
@@ -1895,6 +2224,64 @@ fn state_index(state: &RefCell<State>, id: i64) -> Option<usize> {
     state.borrow().matches.iter().position(|&item| item == id)
 }
 
+fn capture_window_geometry(
+    ui: &AppWindow,
+    cache: &Cell<Option<windows_password_manager::settings::WindowLayout>>,
+    paused: &Cell<bool>,
+    mode: &Cell<Option<bool>>,
+    disabled: &Cell<bool>,
+) -> bool {
+    if ui.get_compact()
+        || disabled.get()
+        || paused.get()
+        || mode.get() != Some(ui.get_fixed_page())
+        || !ui.window().is_visible()
+        || !window_id(ui).is_ok()
+        || ui.window().is_minimized()
+    {
+        return false;
+    }
+    let Ok(id) = window_id(ui) else {
+        return false;
+    };
+    let scale = ui.window().scale_factor() as f64;
+    if !ui.get_fixed_page() {
+        if let Some(layout) = platform::window_layout(id, scale, cache.get()) {
+            cache.set(Some(layout));
+            return true;
+        }
+    } else if let Some((left, top)) = platform::window_position(id) {
+        let next = if let Some(prev) = cache.get() {
+            let span_w = (prev.right - prev.left).max(1);
+            let span_h = (prev.bottom - prev.top).max(1);
+            windows_password_manager::settings::WindowLayout {
+                left,
+                top,
+                right: left + span_w,
+                bottom: top + span_h,
+                ..prev
+            }
+        } else {
+            let width = ui.get_desktop_width().round().clamp(640.0, 16384.0) as u32;
+            let height = ui.get_desktop_height().round().clamp(560.0, 16384.0) as u32;
+            let span_w = (width as f64 * scale).round().max(640.0) as i32;
+            let span_h = (height as f64 * scale).round().max(560.0) as i32;
+            windows_password_manager::settings::WindowLayout {
+                left,
+                top,
+                right: left + span_w,
+                bottom: top + span_h,
+                width,
+                height,
+                maximized: false,
+            }
+        };
+        cache.set(Some(next));
+        return true;
+    }
+    false
+}
+
 fn current_session(state: &RefCell<State>) -> Rc<RefCell<Session>> {
     state.borrow().session.clone()
 }
@@ -1919,7 +2306,7 @@ pub fn run() -> Result<(), String> {
     } else {
         LockSettings::load(&root)?
     }));
-    let geometry_cache = Rc::new(RefCell::new(if reset_boot {
+    let geometry_cache = Rc::new(Cell::new(if reset_boot {
         None
     } else {
         match windows_password_manager::settings::WindowLayout::load(&root) {
@@ -1954,14 +2341,45 @@ pub fn run() -> Result<(), String> {
     } else {
         windows_password_manager::settings::load_appearance(&root)?
     };
-    if let Some(layout) = *geometry_cache.borrow() {
+    let screen_protection = Rc::new(Cell::new(if reset_boot {
+        false
+    } else {
+        windows_password_manager::settings::load_screen_protection(&root)?
+    }));
+    let auto_update = Rc::new(Cell::new(if reset_boot {
+        true
+    } else {
+        windows_password_manager::settings::load_auto_update(&root)?
+    }));
+    let update_ctrl = Rc::new(RefCell::new(UpdateController {
+        available: None,
+        busy: false,
+        cancel: Arc::new(AtomicBool::new(false)),
+        serial: 0,
+        pending_launch: None,
+    }));
+    if let Some(layout) = geometry_cache.get() {
         main.set_desktop_width(layout.width as f32);
         main.set_desktop_height(layout.height as f32);
+        main.window()
+            .set_position(slint::PhysicalPosition::new(layout.left, layout.top));
+    }
+    {
+        let main_weak = main.as_weak();
+        platform::set_max_hover_callback(move |hwnd, hovered| {
+            let _ = main_weak.upgrade_in_event_loop(move |ui| {
+                if window_id(&ui).ok() == Some(hwnd) {
+                    ui.set_max_hovered(hovered);
+                }
+            });
+        });
     }
     for ui in [&main, &popup] {
         ui.set_theme_index(theme);
         ui.set_system_dark(platform::system_dark());
         ui.set_appearance_mode(appearance);
+        ui.set_screen_protection_choice(screen_protection.get());
+        ui.set_auto_update_choice(auto_update.get());
         ui.invoke_apply_appearance();
         let weak = ui.as_weak();
         let cache = geometry_cache.clone();
@@ -1980,11 +2398,19 @@ pub fn run() -> Result<(), String> {
             {
                 return;
             }
-            let fixed = ui.get_fixed_page();
-            let old = mode.replace(Some(fixed));
-            if old.is_some() && (fixed || old == Some(false)) {
+            if window_id(&ui).is_err() {
+                if let Some(layout) = cache.get() {
+                    ui.window()
+                        .set_position(slint::PhysicalPosition::new(layout.left, layout.top));
+                }
                 return;
             }
+            let fixed = ui.get_fixed_page();
+            let old = mode.get();
+            if old == Some(fixed) {
+                return;
+            }
+            mode.set(Some(fixed));
             paused.set(true);
             epoch.set(epoch.get().wrapping_add(1));
             let serial = epoch.get();
@@ -2004,9 +2430,11 @@ pub fn run() -> Result<(), String> {
                         paused.set(false);
                         return;
                     }
-                    if let Some(layout) = *cache.borrow() {
+                    if let Some(layout) = cache.get() {
                         if let Ok(id) = window_id(&ui) {
-                            if let Err(message) = platform::restore_window_layout(id, layout, fixed)
+                            let scale = ui.window().scale_factor() as f64;
+                            if let Err(message) =
+                                platform::restore_window_layout(id, layout, fixed, scale)
                             {
                                 ui.set_status(message.into());
                             }
@@ -2020,7 +2448,7 @@ pub fn run() -> Result<(), String> {
                         }
                     }
                     let weak = ui.as_weak();
-                    Timer::single_shot(Duration::from_millis(200), move || {
+                    Timer::single_shot(Duration::from_millis(120), move || {
                         if epoch.get() == serial && !disabled.get() {
                             paused.set(false);
                             if let Some(ui) = weak.upgrade() {
@@ -2029,8 +2457,9 @@ pub fn run() -> Result<(), String> {
                                         if let Some(layout) = platform::window_layout(
                                             id,
                                             ui.window().scale_factor() as f64,
+                                            cache.get(),
                                         ) {
-                                            *cache.borrow_mut() = Some(layout);
+                                            cache.set(Some(layout));
                                         }
                                     }
                                 }
@@ -2126,6 +2555,7 @@ pub fn run() -> Result<(), String> {
         let layout_mode = geometry_mode.clone();
         let layout_disabled = resetting.clone();
         let layout_root = root.clone();
+        let capture_protection = screen_protection.clone();
         ui.window().on_winit_window_event(move |window, event| {
             use slint::winit_030::winit::{
                 event::ElementState,
@@ -2140,37 +2570,38 @@ pub fn run() -> Result<(), String> {
                     ui.invoke_apply_appearance();
                 }
                 if !ui.get_compact()
-                    && !ui.get_fixed_page()
                     && !layout_paused.get()
                     && !layout_disabled.get()
-                    && layout_mode.get() == Some(false)
-                    && matches!(event, WindowEvent::Moved(_) | WindowEvent::Resized(_))
+                    && layout_mode.get() == Some(ui.get_fixed_page())
+                    && (matches!(event, WindowEvent::Moved(_))
+                        || (!ui.get_fixed_page() && matches!(event, WindowEvent::Resized(_))))
                 {
-                    if let Ok(id) = window_id(&ui) {
-                        if let Some(layout) =
-                            platform::window_layout(id, window.scale_factor() as f64)
-                        {
-                            *layout_cache.borrow_mut() = Some(layout);
-                            let cache = layout_cache.clone();
-                            let disabled = layout_disabled.clone();
-                            let root = layout_root.clone();
-                            let weak = ui.as_weak();
-                            layout_timer.start(
-                                TimerMode::SingleShot,
-                                Duration::from_millis(300),
-                                move || {
-                                    if !disabled.get() && !maintenance::reset_pending(&root) {
-                                        if let Some(layout) = *cache.borrow() {
-                                            if let Err(message) = layout.save(&root) {
-                                                if let Some(ui) = weak.upgrade() {
-                                                    ui.set_status(message.into());
-                                                }
+                    if capture_window_geometry(
+                        &ui,
+                        &layout_cache,
+                        &layout_paused,
+                        &layout_mode,
+                        &layout_disabled,
+                    ) {
+                        let cache = layout_cache.clone();
+                        let disabled = layout_disabled.clone();
+                        let root = layout_root.clone();
+                        let weak = ui.as_weak();
+                        layout_timer.start(
+                            TimerMode::SingleShot,
+                            Duration::from_millis(250),
+                            move || {
+                                if !disabled.get() && !maintenance::reset_pending(&root) {
+                                    if let Some(layout) = cache.get() {
+                                        if let Err(message) = layout.save(&root) {
+                                            if let Some(ui) = weak.upgrade() {
+                                                ui.set_status(message.into());
                                             }
                                         }
                                     }
-                                },
-                            );
-                        }
+                                }
+                            },
+                        );
                     }
                 }
                 if ui.get_compact() && !ui.get_busy() && !ui.get_working() {
@@ -2220,7 +2651,10 @@ pub fn run() -> Result<(), String> {
 
             if matches!(
                 event,
-                WindowEvent::Focused(true) | WindowEvent::Occluded(false) | WindowEvent::Resized(_)
+                WindowEvent::Focused(true)
+                    | WindowEvent::Occluded(false)
+                    | WindowEvent::Resized(_)
+                    | WindowEvent::ScaleFactorChanged { .. }
             ) {
                 if let Some(ui) = weak.upgrade() {
                     if matches!(
@@ -2239,10 +2673,17 @@ pub fn run() -> Result<(), String> {
                             ui.set_status(message.into());
                         }
                         if !ui.get_compact() {
+                            if layout_mode.get().is_none() {
+                                ui.invoke_restore_layout();
+                            }
                             platform::fit_window_to_work_area(id);
                         }
                     }
-                    if !ui.get_fixed_page() && matches!(event, WindowEvent::Resized(_)) {
+                    if !ui.get_fixed_page()
+                        && !layout_paused.get()
+                        && layout_mode.get() == Some(false)
+                        && matches!(event, WindowEvent::Resized(_))
+                    {
                         if let Some((size, maximized, minimized)) =
                             window.with_winit_window(|native| {
                                 (
@@ -2287,6 +2728,13 @@ pub fn run() -> Result<(), String> {
                             }
                         }
                     }
+                    // Apply protection after winit has created and sized the visible native window.
+                    if capture_protection.get()
+                        && ui.window().is_visible()
+                        && let Ok(id) = window_id(&ui)
+                    {
+                        platform::set_screen_protection(id, true);
+                    }
                     ui.set_repaint_frame(!ui.get_repaint_frame());
                 }
                 window.request_redraw();
@@ -2304,8 +2752,17 @@ pub fn run() -> Result<(), String> {
             EventResult::Propagate
         });
     }
+
     let lock_signal = Arc::new(AtomicBool::new(false));
-    let (jobs, results) = mpsc::channel::<JobResult>();
+    let (jobs_tx, results) = mpsc::channel::<JobResult>();
+    let jobs = JobDispatcher {
+        sender: jobs_tx,
+        ui: main.as_weak(),
+    };
+    let popup_watch_timer = Rc::new(Timer::default());
+    let clipboard_seq = Rc::new(Cell::new(0u32));
+    let clipboard_timer = Rc::new(Timer::default());
+
     let (main_state, main_timer) = bind(
         &main,
         session.clone(),
@@ -2313,6 +2770,9 @@ pub fn run() -> Result<(), String> {
         clock.clone(),
         0,
         lock_signal.clone(),
+        None,
+        clipboard_seq.clone(),
+        clipboard_timer.clone(),
     );
     let (popup_state, popup_timer) = bind(
         &popup,
@@ -2321,17 +2781,82 @@ pub fn run() -> Result<(), String> {
         clock.clone(),
         1,
         lock_signal.clone(),
+        Some(popup_watch_timer.clone()),
+        clipboard_seq.clone(),
+        clipboard_timer.clone(),
     );
+
+    // Target-validity watcher runs ONLY while the quick-fill popup is visible.
+    {
+        let popup_weak = popup.as_weak();
+        let popup_state = popup_state.clone();
+        let watch_weak = Rc::downgrade(&popup_watch_timer);
+        popup_watch_timer.start(TimerMode::Repeated, Duration::from_millis(250), move || {
+            let Some(popup) = popup_weak.upgrade() else {
+                return;
+            };
+            if !popup.window().is_visible() {
+                if let Some(watch) = watch_weak.upgrade() {
+                    watch.stop();
+                }
+                return;
+            }
+            if !popup.get_busy() && !popup.get_verification_active() {
+                let mut state = popup_state.borrow_mut();
+                if let Some(error) = state.target.and_then(|target| target.validate().err()) {
+                    state.target = None;
+                    popup.set_can_fill(false);
+                    popup.set_target_label("目标已失效，请重新点击输入框并按呼出快捷键。".into());
+                    popup.set_target_detail("".into());
+                    popup.set_status(error.into());
+                }
+            }
+        });
+        popup_watch_timer.stop();
+    }
+
+    let mailbox = Arc::new(Mutex::new(VecDeque::<Event>::new()));
+    let weak = main.as_weak();
+    let incoming = mailbox.clone();
+    let signal = lock_signal.clone();
+    let native = Native::start(clock.clone(), session.borrow().root.clone(), move |event| {
+        if matches!(event, Event::Lock) {
+            signal.store(true, Ordering::SeqCst);
+        }
+        incoming.lock().unwrap().push_back(event);
+        let _ = weak.upgrade_in_event_loop(|ui| {
+            ui.invoke_native_open();
+        });
+    })?;
+    let Some(native) = native else {
+        return Ok(());
+    };
+    let native = Rc::new(native);
+    if !reset_boot {
+        update::cleanup_staging(&root);
+    }
+
     for ui in [&main, &popup] {
         {
             let main_weak = main.as_weak();
             let popup_weak = popup.as_weak();
             let main_state = main_state.clone();
             let popup_state = popup_state.clone();
+            let native_sync = native.clone();
+            let session_sync = session.clone();
             ui.on_session_changed(move || {
+                native_sync.set_unlocked(session_sync.borrow().vault.is_some());
                 if let (Some(main), Some(popup)) = (main_weak.upgrade(), popup_weak.upgrade()) {
                     refresh(&main, &mut main_state.borrow_mut());
-                    refresh(&popup, &mut popup_state.borrow_mut());
+                    if popup.window().is_visible() {
+                        refresh(&popup, &mut popup_state.borrow_mut());
+                    } else {
+                        let s = session_sync.borrow();
+                        popup.set_unlocked(s.vault.is_some());
+                        popup.set_working(s.working);
+                        popup.set_blocked(s.working || s.auth_owner.is_some());
+                        popup.set_new_vault(!s.path.exists());
+                    }
                     popup.set_can_fill(
                         popup_state.borrow().target.is_some() && popup.get_unlocked(),
                     );
@@ -2346,8 +2871,33 @@ pub fn run() -> Result<(), String> {
             let popup_state = popup_state.clone();
             let main_timer = main_timer.clone();
             let popup_timer = popup_timer.clone();
+            let popup_watch = popup_watch_timer.clone();
+            let native_lock = native.clone();
+            let clip_seq = clipboard_seq.clone();
+            let clip_timer = clipboard_timer.clone();
+            let lock_layout_cache = geometry_cache.clone();
+            let lock_layout_paused = geometry_paused.clone();
+            let lock_layout_mode = geometry_mode.clone();
+            let lock_layout_disabled = resetting.clone();
+            let lock_layout_root = root.clone();
             ui.on_lock_vault(move || {
+                if let Some(main_win) = main_weak.upgrade() {
+                    if capture_window_geometry(
+                        &main_win,
+                        &lock_layout_cache,
+                        &lock_layout_paused,
+                        &lock_layout_mode,
+                        &lock_layout_disabled,
+                    ) && !maintenance::reset_pending(&lock_layout_root)
+                    {
+                        if let Some(layout) = lock_layout_cache.get() {
+                            let _ = layout.save(&lock_layout_root);
+                        }
+                    }
+                }
+                schedule_clipboard_clear(&clip_seq, &clip_timer, Duration::ZERO);
                 session.borrow_mut().lock();
+                native_lock.set_unlocked(false);
                 for (weak, state, timer) in [
                     (&main_weak, &main_state, &main_timer),
                     (&popup_weak, &popup_state, &popup_timer),
@@ -2385,7 +2935,7 @@ pub fn run() -> Result<(), String> {
                     }
                 }
                 if let Some(popup) = popup_weak.upgrade() {
-                    let _ = hide_window(&popup);
+                    let _ = hide_window(&popup, Some(&popup_watch));
                 }
             });
         }
@@ -2396,6 +2946,8 @@ pub fn run() -> Result<(), String> {
             let session = session.clone();
             let popup_state = popup_state.clone();
             let popup_timer = popup_timer.clone();
+            let popup_watch = popup_watch_timer.clone();
+            let protection = screen_protection.clone();
             ui.on_restore(move || {
                 let Some(ui) = weak.upgrade() else {
                     return;
@@ -2404,7 +2956,12 @@ pub fn run() -> Result<(), String> {
                     return;
                 }
                 if let Some(popup) = popup_weak.upgrade() {
-                    cancel(&popup, &mut popup_state.borrow_mut(), &popup_timer);
+                    cancel(
+                        &popup,
+                        &mut popup_state.borrow_mut(),
+                        &popup_timer,
+                        Some(&popup_watch),
+                    );
                 }
                 let result = (|| {
                     let selected = platform::choose_file(window_id(&ui)?, false)?;
@@ -2417,7 +2974,9 @@ pub fn run() -> Result<(), String> {
                                 "已创建恢复副本。请输入备份的主密码；原密码库保持不变。".into(),
                             );
                             main.show().map_err(|e| e.to_string())?;
-                            platform::activate(window_id(&main)?);
+                            let id = window_id(&main)?;
+                            platform::set_screen_protection(id, protection.get());
+                            platform::activate(id);
                             main.invoke_focus_search();
                         }
                     }
@@ -2435,6 +2994,7 @@ pub fn run() -> Result<(), String> {
         let popup_weak = popup.as_weak();
         let popup_state = popup_state.clone();
         let popup_timer = popup_timer.clone();
+        let popup_watch = popup_watch_timer.clone();
         main.on_backup(move || {
             if session.borrow().working || session.borrow().auth_owner.is_some() {
                 return;
@@ -2443,7 +3003,12 @@ pub fn run() -> Result<(), String> {
                 return;
             };
             if let Some(popup) = popup_weak.upgrade() {
-                cancel(&popup, &mut popup_state.borrow_mut(), &popup_timer);
+                cancel(
+                    &popup,
+                    &mut popup_state.borrow_mut(),
+                    &popup_timer,
+                    Some(&popup_watch),
+                );
             }
             let result = (|| {
                 if let Some(path) = platform::choose_file(window_id(&ui)?, true)? {
@@ -2462,23 +3027,7 @@ pub fn run() -> Result<(), String> {
             }
         });
     }
-    let mailbox = Arc::new(Mutex::new(VecDeque::<Event>::new()));
-    let weak = main.as_weak();
-    let incoming = mailbox.clone();
-    let signal = lock_signal.clone();
-    let native = Native::start(clock.clone(), session.borrow().root.clone(), move |event| {
-        if matches!(event, Event::Lock) {
-            signal.store(true, Ordering::SeqCst);
-        }
-        incoming.lock().unwrap().push_back(event);
-        let _ = weak.upgrade_in_event_loop(|ui| {
-            ui.invoke_native_open();
-        });
-    })?;
-    let Some(native) = native else {
-        return Ok(());
-    };
-    let native = Rc::new(native);
+
     if !reset_boot {
         if let Err(message) = startup::relocate_registration() {
             session.borrow_mut().notice.get_or_insert(message);
@@ -2509,12 +3058,17 @@ pub fn run() -> Result<(), String> {
             {
                 return;
             }
+            if ui.get_update_downloading() {
+                ui.set_status("请先等待更新下载结束，或取消下载后再还原。".into());
+                return;
+            }
             let resume = ui.get_reset_incomplete();
             if !resume && (!ui.get_reset_confirmed() || ui.get_reset_master().is_empty()) {
                 return;
             }
             let master = Zeroizing::new(ui.get_reset_master().to_string());
             ui.set_reset_master("".into());
+            reset_secret_masks(&ui);
             let root = session.borrow().root.clone();
             let active = session.borrow().path.clone();
             ui.invoke_lock_vault();
@@ -2538,7 +3092,7 @@ pub fn run() -> Result<(), String> {
                     startup::remove_registration()?;
                     maintenance::finish_reset(&root)
                 })();
-                let _ = jobs.send(JobResult::Reset(result));
+                jobs.send(JobResult::Reset(result));
             });
         });
     }
@@ -2646,6 +3200,10 @@ pub fn run() -> Result<(), String> {
         let clock = clock.clone();
         let main_weak = main.as_weak();
         let popup_weak = popup.as_weak();
+        let protection = screen_protection.clone();
+        let auto_update_pref = auto_update.clone();
+        let save_update_ctrl = update_ctrl.clone();
+        let save_jobs = jobs.clone();
         ui.on_save_settings(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -2658,6 +3216,11 @@ pub fn run() -> Result<(), String> {
                 return;
             }
             let root = session.borrow().root.clone();
+            let theme = ui.get_theme_choice();
+            let appearance = ui.get_appearance_choice();
+            let protect_screen = ui.get_screen_protection_choice();
+            let check_updates = ui.get_auto_update_choice();
+            let was_auto_update = auto_update_pref.get();
             let result = (|| {
                 let shortcut = ui.get_shortcut_input().as_str().parse::<Shortcut>()?;
                 let minutes = *LOCK_MINUTES
@@ -2674,11 +3237,13 @@ pub fn run() -> Result<(), String> {
                 let write = (|| {
                     shortcut.save(&root)?;
                     settings.save(&root)?;
-                    windows_password_manager::settings::save_theme(&root, ui.get_theme_choice())?;
-                    windows_password_manager::settings::save_appearance(
+                    windows_password_manager::settings::save_theme(&root, theme)?;
+                    windows_password_manager::settings::save_appearance(&root, appearance)?;
+                    windows_password_manager::settings::save_screen_protection(
                         &root,
-                        ui.get_appearance_choice(),
+                        protect_screen,
                     )?;
+                    windows_password_manager::settings::save_auto_update(&root, check_updates)?;
                     startup::save(&root, ui.get_start_at_logon(), ui.get_start_in_tray())
                 })();
                 if let Err(message) = write {
@@ -2690,12 +3255,38 @@ pub fn run() -> Result<(), String> {
                 }
                 recorder.commit_shortcut();
                 clock.update(settings);
+                let protection_changed = protection.replace(protect_screen) != protect_screen;
+                auto_update_pref.set(check_updates);
                 for weak in [&main_weak, &popup_weak] {
                     if let Some(window) = weak.upgrade() {
+                        let colors_changed = window.get_theme_index() != theme
+                            || window.get_appearance_mode() != appearance;
                         window.set_shortcut_label(shortcut.to_string().into());
-                        window.set_theme_index(ui.get_theme_choice());
-                        window.set_appearance_mode(ui.get_appearance_choice());
+                        window.set_theme_index(theme);
+                        window.set_appearance_mode(appearance);
+                        window.set_screen_protection_choice(protect_screen);
+                        window.set_auto_update_choice(check_updates);
                         window.invoke_apply_appearance();
+                        // Hidden panels apply capture protection when shown.
+                        if window.window().is_visible() {
+                            if protection_changed && let Ok(hwnd) = window_id(&window) {
+                                platform::set_screen_protection(hwnd, protect_screen);
+                            }
+                            if colors_changed || protection_changed {
+                                window.set_repaint_frame(!window.get_repaint_frame());
+                                window.window().request_redraw();
+                            }
+                        }
+                    }
+                }
+                if !was_auto_update
+                    && check_updates
+                    && save_update_ctrl.borrow().available.is_none()
+                    && (std::env::var_os("PASSWORD_MANAGER_DATA_DIR").is_none()
+                        || std::env::var_os("KEYISLE_UPDATE_URL").is_some())
+                {
+                    if let Some(main_win) = main_weak.upgrade() {
+                        start_update_check(&main_win, &save_update_ctrl, &save_jobs, false);
                     }
                 }
                 Ok::<_, String>(())
@@ -2718,6 +3309,7 @@ pub fn run() -> Result<(), String> {
         let main_timer = main_timer.clone();
         let popup_state = popup_state.clone();
         let popup_timer = popup_timer.clone();
+        let popup_watch = popup_watch_timer.clone();
         let signal = lock_signal.clone();
         let navigate_main = main.as_weak();
         let navigate_popup = popup.as_weak();
@@ -2725,12 +3317,16 @@ pub fn run() -> Result<(), String> {
         let navigate_popup_state = popup_state.clone();
         let navigate_main_timer = main_timer.clone();
         let navigate_popup_timer = popup_timer.clone();
+        let navigate_popup_watch = popup_watch_timer.clone();
+        let navigate_protection = screen_protection.clone();
         let context_main = main.as_weak();
         let context_popup = popup.as_weak();
         let context_main_state = main_state.clone();
         let context_popup_state = popup_state.clone();
         let context_main_timer = main_timer.clone();
         let context_popup_timer = popup_timer.clone();
+        let context_popup_watch = popup_watch_timer.clone();
+        let context_protection = screen_protection.clone();
         popup.on_manage_context(move |action| {
             let (Some(main), Some(popup)) = (context_main.upgrade(), context_popup.upgrade())
             else {
@@ -2741,9 +3337,16 @@ pub fn run() -> Result<(), String> {
                 &popup,
                 &mut context_popup_state.borrow_mut(),
                 &context_popup_timer,
+                Some(&context_popup_watch),
             );
-            if let Err(message) = show_panel(&main, &context_main_state, &context_main_timer, None)
-            {
+            if let Err(message) = show_panel(
+                &main,
+                &context_main_state,
+                &context_main_timer,
+                None,
+                context_protection.get(),
+                None,
+            ) {
                 main.set_status(message.into());
                 return;
             }
@@ -2780,15 +3383,22 @@ pub fn run() -> Result<(), String> {
                     &popup,
                     &mut navigate_popup_state.borrow_mut(),
                     &navigate_popup_timer,
+                    Some(&navigate_popup_watch),
                 );
-                if let Err(message) =
-                    show_panel(&main, &navigate_main_state, &navigate_main_timer, None)
-                {
+                if let Err(message) = show_panel(
+                    &main,
+                    &navigate_main_state,
+                    &navigate_main_timer,
+                    None,
+                    navigate_protection.get(),
+                    None,
+                ) {
                     main.set_status(message.into());
                 }
             }
         });
         let reset_events = resetting.clone();
+        let native_protection = screen_protection.clone();
         main.on_native_open(move || {
             let (Some(main), Some(popup)) = (main_weak.upgrade(), popup_weak.upgrade()) else {
                 return;
@@ -2815,7 +3425,14 @@ pub fn run() -> Result<(), String> {
                             main.invoke_lock_vault();
                             signal.store(false, Ordering::SeqCst);
                         }
-                        show_panel(&popup, &popup_state, &popup_timer, target)
+                        show_panel(
+                            &popup,
+                            &popup_state,
+                            &popup_timer,
+                            Some(&popup_watch),
+                            native_protection.get(),
+                            target,
+                        )
                     }
                     Event::ShortcutRecorded(shortcut) => {
                         main.invoke_captured_shortcut(
@@ -2825,8 +3442,20 @@ pub fn run() -> Result<(), String> {
                         Ok(())
                     }
                     Event::Manage => {
-                        cancel(&popup, &mut popup_state.borrow_mut(), &popup_timer);
-                        show_panel(&main, &main_state, &main_timer, None)
+                        cancel(
+                            &popup,
+                            &mut popup_state.borrow_mut(),
+                            &popup_timer,
+                            Some(&popup_watch),
+                        );
+                        show_panel(
+                            &main,
+                            &main_state,
+                            &main_timer,
+                            None,
+                            native_protection.get(),
+                            None,
+                        )
                     }
                     Event::Lock => {
                         main.invoke_lock_vault();
@@ -2844,7 +3473,143 @@ pub fn run() -> Result<(), String> {
             }
         });
     }
-    let housekeeping = Timer::default();
+
+    // Manual & one-click in-app update handlers + background auto-check timers.
+    let auto_check_initial = Rc::new(Timer::default());
+    let auto_check_periodic = Rc::new(Timer::default());
+    {
+        let main_weak = main.as_weak();
+        let ctrl = update_ctrl.clone();
+        let jobs_ref = jobs.clone();
+        main.on_check_update(move || {
+            if let Some(main) = main_weak.upgrade() {
+                start_update_check(&main, &ctrl, &jobs_ref, true);
+            }
+        });
+    }
+    {
+        let main_weak = main.as_weak();
+        let ctrl = update_ctrl.clone();
+        main.on_cancel_update(move || {
+            if let Some(main) = main_weak.upgrade().filter(|ui| ui.get_update_downloading()) {
+                ctrl.borrow().cancel.store(true, Ordering::SeqCst);
+                main.set_update_canceling(true);
+                main.set_update_progress_text("正在取消下载…".into());
+            }
+        });
+    }
+    {
+        let main_weak = main.as_weak();
+        let ctrl = update_ctrl.clone();
+        let session_ref = session.clone();
+        let reset_ref = resetting.clone();
+        let jobs_ref = jobs.clone();
+        main.on_install_update(move || {
+            let Some(main) = main_weak.upgrade() else {
+                return;
+            };
+            if session_ref.borrow().working
+                || session_ref.borrow().auth_owner.is_some()
+                || reset_ref.get()
+            {
+                main.set_update_error("请先完成当前验证或维护操作，再执行覆盖升级。".into());
+                return;
+            }
+            if guard_editor(&main, 4) {
+                main.set_about_open(false);
+                return;
+            }
+            let mut c = ctrl.borrow_mut();
+            if c.busy {
+                return;
+            }
+            let Some(manifest) = c.available.clone() else {
+                return;
+            };
+            c.serial = c.serial.wrapping_add(1);
+            let serial = c.serial;
+            let cancel = Arc::new(AtomicBool::new(false));
+            c.cancel = cancel.clone();
+            c.busy = true;
+            drop(c);
+
+            main.set_update_error("".into());
+            main.set_update_status("".into());
+            main.set_update_downloading(true);
+            main.set_update_progress(0.0);
+            main.set_update_progress_text("正在连接下载源…".into());
+
+            let root_dir = session_ref.borrow().root.clone();
+            let jobs_bg = jobs_ref.clone();
+            std::thread::spawn(move || {
+                let mut last_tick: Option<Instant> = None;
+                let progress_jobs = jobs_bg.clone();
+                let result = update::prepare_update_install(
+                    &root_dir,
+                    &manifest,
+                    &cancel,
+                    |received, total| {
+                        let should_emit = received == 0
+                            || received == total
+                            || last_tick.is_none_or(|t| t.elapsed() >= Duration::from_millis(80));
+                        if should_emit {
+                            last_tick = Some(Instant::now());
+                            progress_jobs.send(JobResult::UpdateProgress {
+                                serial,
+                                received,
+                                total,
+                            });
+                        }
+                    },
+                );
+                jobs_bg.send(JobResult::UpdatePrepared { serial, result });
+            });
+        });
+    }
+    if std::env::var_os("PASSWORD_MANAGER_DATA_DIR").is_none()
+        || std::env::var_os("KEYISLE_UPDATE_URL").is_some()
+    {
+        for (timer_handle, interval, repeated) in [
+            (&auto_check_initial, Duration::from_secs(4), false),
+            (&auto_check_periodic, Duration::from_secs(6 * 3600), true),
+        ] {
+            let main_weak = main.as_weak();
+            let popup_weak = popup.as_weak();
+            let auto_pref = auto_update.clone();
+            let reset_flag = resetting.clone();
+            let ctrl = update_ctrl.clone();
+            let jobs_ref = jobs.clone();
+            timer_handle.start(
+                if repeated {
+                    TimerMode::Repeated
+                } else {
+                    TimerMode::SingleShot
+                },
+                interval,
+                move || {
+                    if !auto_pref.get() || reset_flag.get() {
+                        return;
+                    }
+                    let (Some(main), Some(popup)) = (main_weak.upgrade(), popup_weak.upgrade())
+                    else {
+                        return;
+                    };
+                    if popup.window().is_visible()
+                        || main.get_verification_active()
+                        || popup.get_verification_active()
+                        || main.get_busy()
+                        || popup.get_busy()
+                        || main.get_working()
+                    {
+                        return;
+                    }
+                    start_update_check(&main, &ctrl, &jobs_ref, false);
+                },
+            );
+        }
+    }
+
+    // Event-driven async job completion handler (0ms latency, zero idle polling).
     {
         let session = session.clone();
         let main_weak = main.as_weak();
@@ -2855,23 +3620,13 @@ pub fn run() -> Result<(), String> {
         let clock = clock.clone();
         let reset_state = resetting.clone();
         let reset_restart = restart_after_reset.clone();
-        housekeeping.start(TimerMode::Repeated, Duration::from_millis(200), move || {
+        let job_update_ctrl = update_ctrl.clone();
+        main.on_process_jobs(move || {
             let (Some(main), Some(popup)) = (main_weak.upgrade(), popup_weak.upgrade()) else {
                 return;
             };
             if signal.swap(false, Ordering::SeqCst) {
                 main.invoke_lock_vault();
-            }
-            if popup.window().is_visible() && !popup.get_busy() && !popup.get_verification_active()
-            {
-                let mut state = popup_state.borrow_mut();
-                if let Some(error) = state.target.and_then(|target| target.validate().err()) {
-                    state.target = None;
-                    popup.set_can_fill(false);
-                    popup.set_target_label("目标已失效，请重新点击输入框并按呼出快捷键。".into());
-                    popup.set_target_detail("".into());
-                    popup.set_status(error.into());
-                }
             }
             while let Ok(job) = results.try_recv() {
                 match job {
@@ -2889,6 +3644,7 @@ pub fn run() -> Result<(), String> {
                                 main.set_reset_incomplete(pending);
                                 main.set_reset_open(true);
                                 main.set_reset_master("".into());
+                                reset_secret_masks(&main);
                                 main.set_status(message.into());
                                 main.invoke_focus_search();
                             }
@@ -2918,15 +3674,13 @@ pub fn run() -> Result<(), String> {
                                     session.borrow_mut().path = previous;
                                 }
                                 main.invoke_session_changed();
-                                main.set_status(
-                                    result
-                                        .map(|_| {
-                                            "已验证并恢复到独立副本，原密码库与备份均保留。"
-                                                .to_string()
-                                        })
-                                        .unwrap_or_else(|e| e)
-                                        .into(),
-                                );
+                                match result {
+                                    Ok(()) => success(
+                                        &main,
+                                        "已验证并恢复到独立副本，原密码库与备份均保留。".into(),
+                                    ),
+                                    Err(e) => main.set_status(e.into()),
+                                }
                                 clock.touch();
                             }
                             outcome => {
@@ -2936,14 +3690,13 @@ pub fn run() -> Result<(), String> {
                                 } else {
                                     Ok(())
                                 };
-                                let message = outcome
-                                    .map(|_| {
-                                        "已删除选中的备份，其他备份和当前密码库保留。".to_string()
-                                    })
-                                    .unwrap_or_else(|e| e);
-                                main.set_status(
-                                    refreshed.map(|_| message).unwrap_or_else(|e| e).into(),
-                                );
+                                match refreshed.and(outcome) {
+                                    Ok(_) => success(
+                                        &main,
+                                        "已删除选中的备份，其他备份和当前密码库保留。".into(),
+                                    ),
+                                    Err(e) => main.set_status(e.into()),
+                                }
                                 if main.get_backups_open() {
                                     main.invoke_focus_search();
                                 }
@@ -2953,28 +3706,37 @@ pub fn run() -> Result<(), String> {
                     JobResult::Maintenance(result) => {
                         session.borrow_mut().working = false;
                         main.invoke_session_changed();
-                        main.set_status(result.unwrap_or_else(|message| message).into());
+                        match result {
+                            Ok(message) => success(&main, message),
+                            Err(message) => main.set_status(message.into()),
+                        }
                         main.invoke_focus_search();
                     }
                     JobResult::Unlock(generation, result) => {
                         let mut session = session.borrow_mut();
                         session.working = false;
-                        let message = if generation != session.generation {
+                        let outcome = if generation != session.generation {
                             None
                         } else {
-                            match result.and_then(|vault| session.accept(vault)) {
-                                Ok(()) => {
-                                    clock.touch();
-                                    Some("已解锁。".to_string())
-                                }
-                                Err(message) => Some(message),
-                            }
+                            Some(result.and_then(|vault| session.accept(vault)))
                         };
                         drop(session);
                         main.invoke_session_changed();
-                        if let Some(message) = message {
-                            main.set_status(message.clone().into());
-                            popup.set_status(message.into());
+                        match outcome {
+                            Some(Ok(())) => {
+                                clock.touch();
+                                success(&main, "已解锁。".into());
+                                if popup.window().is_visible() {
+                                    success(&popup, "已解锁。".into());
+                                } else {
+                                    popup.set_status("".into());
+                                }
+                            }
+                            Some(Err(message)) => {
+                                main.set_status(message.clone().into());
+                                popup.set_status(message.into());
+                            }
+                            None => {}
                         }
                     }
                     JobResult::Verify {
@@ -3016,9 +3778,17 @@ pub fn run() -> Result<(), String> {
                             if started.elapsed() >= Duration::from_secs(60) {
                                 return Err("验证请求已过期，请取消后重试。".into());
                             }
-                            if signal.load(Ordering::SeqCst)
-                                || !window_id(ui).is_ok_and(platform::is_foreground)
-                            {
+                            let mut fg_ok = window_id(ui).is_ok_and(platform::is_foreground);
+                            if !fg_ok && !signal.load(Ordering::SeqCst) {
+                                for _ in 0..4 {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                    if window_id(ui).is_ok_and(platform::is_foreground) {
+                                        fg_ok = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if signal.load(Ordering::SeqCst) || !fg_ok {
                                 return Err(
                                     "验证后窗口已切换，本次操作未获授权。请回到Keyisle重试。"
                                         .into(),
@@ -3042,6 +3812,7 @@ pub fn run() -> Result<(), String> {
                                 session.borrow_mut().auth_owner = None;
                                 ui.set_verification_active(false);
                                 ui.set_verify_master("".into());
+                                reset_secret_masks(ui);
                                 ui.set_status("".into());
                                 drop(state);
                                 clock.touch();
@@ -3080,19 +3851,144 @@ pub fn run() -> Result<(), String> {
                             }
                         }
                     }
+                    JobResult::UpdateCheck {
+                        serial,
+                        manual,
+                        result,
+                    } => {
+                        let mut ctrl = job_update_ctrl.borrow_mut();
+                        if serial != ctrl.serial {
+                            continue;
+                        }
+                        ctrl.busy = false;
+                        main.set_update_checking(false);
+                        match result {
+                            Ok(CheckOutcome::Available(manifest)) => {
+                                let ver = manifest.version.clone();
+                                main.set_update_available(true);
+                                main.set_update_version(ver.clone().into());
+                                main.set_update_notes(manifest.notes.clone().into());
+                                main.set_update_error("".into());
+                                main.set_update_status("".into());
+                                ctrl.available = Some(manifest);
+                                if manual && main.get_settings_open() {
+                                    success(
+                                        &main,
+                                        format!(
+                                            "发现新版本 v{ver}，点击“前往更新”即可直接覆盖安装。"
+                                        ),
+                                    );
+                                }
+                            }
+                            Ok(CheckOutcome::UpToDate) => {
+                                ctrl.available = None;
+                                main.set_update_available(false);
+                                if manual {
+                                    let message = format!(
+                                        "当前已是最新版本（v{}）。",
+                                        env!("CARGO_PKG_VERSION")
+                                    );
+                                    main.set_update_error("".into());
+                                    main.set_update_status(message.clone().into());
+                                    if main.get_settings_open() {
+                                        success(&main, message);
+                                    }
+                                }
+                            }
+                            Err(message) => {
+                                if manual {
+                                    main.set_update_error(message.clone().into());
+                                    if main.get_settings_open() {
+                                        main.set_status(message.into());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    JobResult::UpdateProgress {
+                        serial,
+                        received,
+                        total,
+                    } => {
+                        let ctrl = job_update_ctrl.borrow();
+                        if serial == ctrl.serial
+                            && main.get_update_downloading()
+                            && !main.get_update_canceling()
+                        {
+                            let pct = if total > 0 {
+                                (received as f32 * 100.0 / total as f32).clamp(0.0, 100.0)
+                            } else {
+                                0.0
+                            };
+                            main.set_update_progress(pct);
+                            main.set_update_progress_text(
+                                format!(
+                                    "{:.2} / {:.2} MiB（{:.0}%）",
+                                    received as f64 / 1_048_576.0,
+                                    total as f64 / 1_048_576.0,
+                                    pct
+                                )
+                                .into(),
+                            );
+                        }
+                    }
+                    JobResult::UpdatePrepared { serial, result } => {
+                        let mut ctrl = job_update_ctrl.borrow_mut();
+                        if serial != ctrl.serial {
+                            continue;
+                        }
+                        ctrl.busy = false;
+                        let was_canceled = ctrl.cancel.load(Ordering::SeqCst);
+                        drop(ctrl);
+                        main.set_update_downloading(false);
+                        main.set_update_canceling(false);
+                        if was_canceled {
+                            main.set_update_status("已取消下载。".into());
+                            continue;
+                        }
+                        match result {
+                            Err(message) => {
+                                main.set_update_error(message.into());
+                            }
+                            Ok(prepared) => {
+                                if session.borrow().working
+                                    || session.borrow().auth_owner.is_some()
+                                    || reset_state.get()
+                                {
+                                    main.set_update_error(
+                                        "请先完成当前的密码库验证或维护操作，再点击覆盖安装。"
+                                            .into(),
+                                    );
+                                    continue;
+                                }
+                                if guard_editor(&main, 4) {
+                                    main.set_about_open(false);
+                                    continue;
+                                }
+                                main.set_update_installing(true);
+                                job_update_ctrl.borrow_mut().pending_launch = Some(prepared);
+                                let _ = slint::quit_event_loop();
+                            }
+                        }
+                    }
                 }
-            }
-            if session.borrow().vault.is_some() && platform::idle_expired(&clock) {
-                main.invoke_lock_vault();
             }
         });
     }
+
     if !std::env::args().any(|arg| arg == "--autostart")
         || !startup::load_tray(&session.borrow().root)?
         || resumed_master_change
         || !native.shortcut_registered
     {
-        show_panel(&main, &main_state, &main_timer, None)?;
+        show_panel(
+            &main,
+            &main_state,
+            &main_timer,
+            None,
+            screen_protection.get(),
+            None,
+        )?;
     }
     if resumed_master_change {
         main.set_status("已完成上次中断的主密码切换，请使用新主密码解锁。".into());
@@ -3101,17 +3997,34 @@ pub fn run() -> Result<(), String> {
         main.set_status("呼出快捷键被占用，请从托盘打开主界面，在设置中修改。".into());
     }
     let result = slint::run_event_loop_until_quit().map_err(|e| e.to_string());
+    auto_check_initial.stop();
+    auto_check_periodic.stop();
+    update_ctrl.borrow().cancel.store(true, Ordering::SeqCst);
     geometry_timer.stop();
+    let _ = capture_window_geometry(
+        &main,
+        &geometry_cache,
+        &geometry_paused,
+        &geometry_mode,
+        &resetting,
+    );
     let layout_result = if !resetting.get() && !maintenance::reset_pending(&root) {
         geometry_cache
-            .borrow()
+            .get()
             .map_or(Ok(()), |layout| layout.save(&root))
     } else {
         Ok(())
     };
+    clipboard_timer.stop();
+    for _ in 0..20 {
+        if platform::clear_clipboard_if_matches(clipboard_seq.get()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
     main_timer.stop();
     popup_timer.stop();
-    housekeeping.stop();
+    popup_watch_timer.stop();
     session.borrow_mut().lock();
     main_state
         .borrow()
@@ -3125,7 +4038,9 @@ pub fn run() -> Result<(), String> {
     active_recording.borrow_mut().take();
     native.stop();
     drop(native);
-    if restart_after_reset.get() {
+    if let Some(prepared) = update_ctrl.borrow_mut().pending_launch.take() {
+        update::launch_prepared_update(&prepared)?;
+    } else if restart_after_reset.get() {
         std::process::Command::new(
             std::env::current_exe().map_err(|_| "无法定位程序以重新启动。")?,
         )

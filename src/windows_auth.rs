@@ -306,6 +306,24 @@ pub fn request(
     if cancel.load(Ordering::SeqCst) || locked.load(Ordering::SeqCst) {
         return Err("验证已取消。".into());
     }
+    let job = unsafe { CreateJobObjectW(null(), null()) };
+    if job.is_null() {
+        return Err("无法创建验证进程保护。".into());
+    }
+    let _job = Token(job);
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    } == 0
+    {
+        return Err("无法保护 Windows 验证进程，请改用主密码。".into());
+    }
     let mut child = Command::new(std::env::current_exe().map_err(|_| "无法定位系统验证程序。")?)
         .arg("--windows-auth-helper")
         .arg(owner.to_string())
@@ -316,23 +334,7 @@ pub fn request(
         .spawn()
         .map_err(|_| "无法启动 Windows 验证。")?;
     let result = (|| {
-        let job = unsafe { CreateJobObjectW(null(), null()) };
-        if job.is_null() {
-            return Err("无法创建验证进程保护。".into());
-        }
-        let _job = Token(job);
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            )
-        } == 0
-            || unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0
-        {
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle()) } == 0 {
             return Err("无法保护 Windows 验证进程，请改用主密码。".into());
         }
         unsafe {
@@ -432,6 +434,16 @@ pub fn helper() -> i32 {
         let locked = Arc::new(AtomicBool::new(false));
         let verified = prompt(proxy as usize, &title, cancelled.clone(), locked.clone())
             .and_then(|credentials| credentials.verify(cancelled, locked));
+        if verified.is_ok() {
+            unsafe {
+                let mut pid = 0;
+                GetWindowThreadProcessId(owner as HWND, &mut pid);
+                if pid != 0 {
+                    AllowSetForegroundWindow(pid);
+                }
+                SetForegroundWindow(owner as HWND);
+            }
+        }
         unsafe {
             DestroyWindow(proxy);
         }

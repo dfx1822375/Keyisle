@@ -13,12 +13,17 @@ fn main() {
         .define("SQLITE_THREADSAFE", "1")
         .define("SQLITE_ENABLE_COLUMN_METADATA", None)
         .define("SQLITE_ENABLE_API_ARMOR", None)
+        .define("SQLITE_SECURE_DELETE", None)
         .define("SQLITE_OMIT_LOAD_EXTENSION", None)
+        .define("SQLITE_OMIT_DEPRECATED", None)
+        .define("SQLITE_DQS", "0")
+        .define("SQLITE_DEFAULT_MEMSTATUS", "0")
         .define("LTC_SOURCE", None)
         .define("LTC_NO_PK", None)
         .define("LTC_NO_PKCS", None)
         .define("LTC_PKCS_5", None)
         .define("LTC_NO_ASM", None)
+        .define("ARGTYPE", "4")
         .warnings(false);
     for source in sqlcipher_src::LIBTOMCRYPT_SOURCES {
         build.file(dir.join(source));

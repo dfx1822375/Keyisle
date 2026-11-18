@@ -26,7 +26,7 @@ These links follow the latest published release. No Rust toolchain, database ins
 
 The installer runs for the current user, without administrator privileges. Program files default to `%LOCALAPPDATA%\Programs\Keyisle`; vaults and preferences use `%LOCALAPPDATA%\PasswordHelper`. The portable app uses the same data location.
 
-Before upgrading, save your work and exit Keyisle from the tray. Install over the existing version to keep accounts, backups, and preferences. Uninstalling also preserves your data. See the [installation and uninstall guide](docs/installation.md).
+Seamless in-place upgrades are supported without manually exiting from the tray: whether upgrading from **About Keyisle** inside the app or running a new `Setup.exe` directly, the running instance is notified to lock the vault and exit gracefully (prompting first if unsaved account edits exist) while keeping all accounts, backups, and preferences intact. Uninstalling also preserves your data. See the [installation and uninstall guide](docs/installation.md).
 
 The current installer is unsigned. Windows may show an unknown-publisher or download-reputation prompt.
 
@@ -39,7 +39,7 @@ The current installer is unsigned. Windows may show an unknown-publisher or down
 
 ## Find and fill from the keyboard
 
-Search names, usernames, categories, and tags using Chinese text, full pinyin, pinyin initials, multiple terms, or typo-tolerant matching. Matches are highlighted; passwords and notes are excluded from search.
+Search names, usernames, categories, tags, and URLs using Chinese text, full pinyin, pinyin initials, multiple terms, or typo-tolerant matching. Matches are highlighted; passwords and notes are excluded from search.
 
 With an empty query, the popup favors accounts recently used successfully in the target application. With a query, relevance comes first. Failed or canceled fills do not change recent ordering.
 
@@ -51,7 +51,7 @@ Application history is a sorting aid. Chrome websites currently share the browse
 
 ## Manage accounts and sensitive entries
 
-Store categories, tags, URLs, and notes alongside each account. Use the context menu, double-click, or `F2` to edit. `Alt+Enter` opens read-only details with the password masked by default; viewing a sensitive entry does not authorize a later edit.
+Store categories, tags, URLs, and notes alongside each account, with a built-in CSPRNG password generator in the editor so new passwords never need to pass through an external clipboard. Use the context menu, double-click, or `F2` to edit. `Alt+Enter` opens read-only details with the password masked by default and an optional protected copy action (excluded from Windows Clipboard History and auto-cleared after 15 seconds or on lock); viewing a sensitive entry does not authorize a later edit.
 
 Mark an entry as sensitive to require verification before viewing, editing, deleting, or filling it. Windows account password verification is the default; `Tab` switches to PIN / Windows Hello or the vault master password. Each approval is limited to the current action. Windows account passwords are collected by the system credentials dialog and are not stored in the vault.
 
@@ -61,7 +61,7 @@ Mark an entry as sensitive to require verification before viewing, editing, dele
 
 ## Appearance, locking, and backups
 
-Choose system, light, or dark appearance with teal, blue, violet, or graphite accents. Record a shortcut by pressing the keys you want, and save appearance, shortcut, lock, and startup preferences together. The main window supports dragging and resizing and remembers its layout across restarts.
+Choose system, light, or dark appearance with teal, blue, violet, or graphite accents, plus optional window screen-capture protection and automatic background update checks. Record a shortcut by pressing the keys you want, and save appearance, capture protection, shortcut, lock, startup, and update preferences together. The main window supports dragging and resizing and remembers its layout across restarts.
 
 The default lock timeout is 5 minutes of computer inactivity. Both the timeout and idle basis are configurable. Windows session lock, sleep, and disconnection lock the vault and cancel pending consent or filling. Manual launch opens the main window; automatic startup can remain in the tray.
 
@@ -95,7 +95,7 @@ Reset requires the current vault master password and confirmation. It removes so
 - Elevated apps, protected inputs, and remote sessions may reject simulated input. Browser fields can share window handles; Keyisle cannot prove a website or field has remained unchanged. Reopen the popup after changing the destination page or input.
 - Global Escape handling applies to the ordinary interactive desktop. Windows secure desktop remains isolated; Keyisle does not record other keystrokes.
 - Keyisle has not undergone an independent security audit. Automated tests cannot replace an audit or protect a compromised operating system.
-- In-app update checking and installation are not enabled yet. Use the [latest release page](https://github.com/dfx1822375/Keyisle/releases/latest) for updates.
+- Built-in update checking and seamless in-place upgrades are enabled for both installer and portable deployments: Keyisle verifies an ECDSA P-256 signed `update.json` manifest against its embedded release public key, enforces version monotonicity and SHA-256 integrity, locks the vault, and upgrades in place. Manual downloads remain available on the [latest release page](https://github.com/dfx1822375/Keyisle/releases/latest).
 
 The [validation record](docs/validation.md) separates automated checks from untested manual scenarios, including real aTrust use, successful PIN verification, multiple monitors, and DPI changes. The [acceptance checklist](docs/acceptance.md) and [release process](docs/release.md) provide further details.
 
