@@ -112,13 +112,14 @@ impl LockClock {
 pub enum ProtectedAction {
     View(i64),
     Edit(i64),
-    Delete(i64),
+    Delete(u64),
     Fill(i64, FillMode),
 }
 impl ProtectedAction {
-    pub fn record(self) -> i64 {
+    pub fn record(self) -> Option<i64> {
         match self {
-            Self::View(id) | Self::Edit(id) | Self::Delete(id) | Self::Fill(id, _) => id,
+            Self::View(id) | Self::Edit(id) | Self::Fill(id, _) => Some(id),
+            Self::Delete(_) => None,
         }
     }
 }

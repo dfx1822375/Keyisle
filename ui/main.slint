@@ -14,9 +14,10 @@ export struct EntryRow {
     hint: string,
     hint-rich: styled-text,
     sensitive: bool,
+    checked: bool,
 }
 
-export struct BackupRow { title: string, detail: string }
+export struct BackupRow { title: string, detail: string, checked: bool }
 
 export component AppWindow inherits Window {
     in property <bool> compact;
@@ -131,6 +132,9 @@ export component AppWindow inherits Window {
     in-out property <bool> start-in-tray;
     in-out property <bool> screen-protection-choice;
     in-out property <bool> auto-update-choice: true;
+    in-out property <string> backup-directory-choice;
+    in property <string> backup-directory-label;
+    callback choose-backup-directory();
     in-out property <bool> context-open;
     changed blocked => { if (root.blocked) { root.context-open = false; root.app-menu-open = false; } }
     in-out property <bool> context-has-record;
@@ -173,12 +177,24 @@ export component AppWindow inherits Window {
     in property <[BackupRow]> backup-rows;
     in-out property <int> selected-backup: -1;
     in-out property <int> backup-confirm-mode;
+    in-out property <bool> backup-batch;
+    in property <int> backup-checked;
+    in property <int> backup-delete-count;
     in-out property <string> backup-master;
     callback open-backups();
     callback close-backups();
     callback refresh-backups();
     callback delete-backup();
     callback restore-backup();
+    callback toggle-backup-batch();
+    callback check-backup(int, bool);
+    function cancel-backup-operation() {
+        root.backup-confirm-mode = 0;
+        root.backup-master = "";
+        root.secret-serial += 1;
+        root.status = "";
+        root.focus-search();
+    }
     changed selected-backup => {
         root.backup-confirm-mode = 0;
         root.backup-master = "";
@@ -221,6 +237,15 @@ export component AppWindow inherits Window {
     private property <bool> discard-danger-focused;
 
     in-out property <bool> delete-confirm;
+    in-out property <bool> account-batch;
+    in property <int> account-checked;
+    callback toggle-account-batch();
+    callback check-account(int, bool);
+    function cancel-delete() {
+        root.delete-confirm = false;
+        root.status = "";
+        root.focus-search();
+    }
     in-out property <string> master;
     in-out property <string> confirmation;
     in-out property <string> edit-title;
@@ -312,7 +337,26 @@ export component AppWindow inherits Window {
                 if (event.text == Key.UpArrow) { root.selected-backup = max(root.selected-backup - 1, 0); root.scroll-backup-selected(); return accept; }
             }
             if (event.modifiers.alt && event.text == " " && !root.compact) { root.system-menu(); return accept; }
-            if (event.text == Key.Escape) { if (root.reset-open) { if (!root.working && !root.reset-incomplete) { root.close-reset(); } } else if (root.verification-active) { root.cancel-verification(); } else if (root.backups-open) { if (root.backup-confirm-mode != 0 && !root.working) { root.backup-confirm-mode = 0; root.backup-master = ""; root.secret-serial += 1; } else { root.close-backups(); } } else if (root.maintenance-open) { root.close-maintenance(); } else if (root.settings-open) { root.settings-open = false; } else if (root.editing) { root.cancel-edit(); } else if (root.about-open) { root.close-about(); } else if (root.details-open) { root.close-details(); } else { root.cancel(); } return accept; }
+            if (event.text == Key.Escape) {
+                if (root.reset-open) { if (!root.working && !root.reset-incomplete) { root.close-reset(); } }
+                else if (root.verification-active) { root.cancel-verification(); }
+                else if (root.backups-open) {
+                    if (!root.working) {
+                        if (root.backup-confirm-mode != 0) { root.cancel-backup-operation(); }
+                        else if (root.backup-batch) { root.toggle-backup-batch(); }
+                        else { root.close-backups(); }
+                    }
+                }
+                else if (root.maintenance-open) { root.close-maintenance(); }
+                else if (root.settings-open) { root.settings-open = false; }
+                else if (root.editing) { root.cancel-edit(); }
+                else if (root.about-open) { root.close-about(); }
+                else if (root.details-open) { root.close-details(); }
+                else if (root.delete-confirm) { root.cancel-delete(); }
+                else if (root.account-batch) { root.toggle-account-batch(); }
+                else { root.cancel(); }
+                return accept;
+            }
             return reject;
         }
 
@@ -356,7 +400,7 @@ export component AppWindow inherits Window {
                         text: "新版本 v" + root.update-version;
                         height: 30px;
                         label-padding: 10px;
-                        enabled: !root.delete-confirm && !root.ui-blocked;
+                        enabled: !root.account-batch && !root.delete-confirm && !root.ui-blocked;
                         clicked => { root.open-about(); }
                     }
                     Button {
@@ -364,7 +408,7 @@ export component AppWindow inherits Window {
                         text: "新增账号";
                         width: 108px;
                         primary: true;
-                        enabled: !root.delete-confirm && !root.ui-blocked;
+                        enabled: !root.account-batch && !root.delete-confirm && !root.ui-blocked;
                         clicked => { root.new-entry(); }
                     }
                 }
@@ -375,9 +419,9 @@ export component AppWindow inherits Window {
                         accessible-label: "搜索账号";
                         text <=> root.query;
                         placeholder-text: "搜索名称、账号、标签、网址… 支持拼音／简拼／模糊匹配";
-                        enabled: !root.busy && !root.ui-blocked;
+                        enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
                         key-pressed(event) => {
-                            if (event.text == Key.F2 && !root.compact && !root.ui-blocked && !root.delete-confirm) { root.edit-entry(); return accept; }
+                            if (event.text == Key.F2 && !root.compact && !root.ui-blocked && !root.account-batch) { root.edit-entry(); return accept; }
                             if ((event.text == Key.F10 && event.modifiers.shift) || event.text == Key.Menu) {
                                 if (root.selected >= 0 && !root.ui-blocked) { root.scroll-selected(); root.request-context(root.list-left + 12, root.list-top + root.selected * 64 + root.list-scroll + 20); }
                                 return accept;
@@ -391,7 +435,7 @@ export component AppWindow inherits Window {
                                 return accept;
                             }
                             if (event.text == Key.Return) {
-                                if (event.modifiers.alt && !root.compact) { root.view-entry(); return accept; }
+                                if (event.modifiers.alt && !root.compact && !root.account-batch) { root.view-entry(); return accept; }
                                 if (event.modifiers.alt || event.modifiers.meta) { return accept; }
                                 root.next-action = event.modifiers.control ? FillAction.username : event.modifiers.shift ? FillAction.both : FillAction.password;
                             }
@@ -408,7 +452,7 @@ export component AppWindow inherits Window {
                         model: root.categories;
                         current-index <=> root.category-index;
                         accessible-label: "分类筛选";
-                        enabled: !root.busy && !root.ui-blocked;
+                        enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
                         selected(value) => { root.category = self.current-index == 0 ? "" : value; root.search-changed(); }
                     }
                     ComboBox {
@@ -416,7 +460,7 @@ export component AppWindow inherits Window {
                         model: root.tags;
                         current-index <=> root.tag-index;
                         accessible-label: "标签筛选";
-                        enabled: !root.busy && !root.ui-blocked;
+                        enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
                         selected(value) => { root.tag = self.current-index == 0 ? "" : value; root.search-changed(); }
                     }
                 }
@@ -450,18 +494,19 @@ export component AppWindow inherits Window {
                             height: root.entries.length > 0 ? root.entries.length * 64px - (root.compact ? 8px : 4px) : 56px;
                             spacing: root.compact ? 8px : 4px;
                             for entry[index] in root.entries: Rectangle {
+                                property <bool> marked: root.account-batch ? entry.checked : index == root.selected;
                                 height: root.compact ? 56px : 60px;
                                 border-radius: 10px;
-                                background: index == root.selected ? Theme.selection : row-touch.has-hover ? Theme.hover : Theme.surface;
+                                background: self.marked ? Theme.selection : row-touch.has-hover ? Theme.hover : Theme.surface;
                                 border-width: 1px;
-                                border-color: index == root.selected ? Theme.selection-line : row-touch.has-hover ? Theme.line : Theme.line-subtle;
+                                border-color: self.marked ? Theme.selection-line : row-touch.has-hover ? Theme.line : Theme.line-subtle;
                                 accessible-role: button;
                                 accessible-label: (index == root.selected ? "已选择，" : "") + entry.title + "，" + entry.username + "，" + entry.detail;
-                                accessible-action-default => { root.selected = index; }
-                                if index == root.selected: Rectangle { x: 0px; y: 10px; width: 3.5px; height: parent.height - 20px; border-radius: 2px; background: Theme.brand; }
+                                accessible-action-default => { if (!root.delete-confirm) { root.selected = index; } }
+                                if self.marked: Rectangle { x: 0px; y: 10px; width: 3.5px; height: parent.height - 20px; border-radius: 2px; background: Theme.brand; }
                                 VerticalLayout {
                                     padding: 6px;
-                                    padding-left: 13px;
+                                    padding-left: root.account-batch ? 43px : 13px;
                                     padding-right: 12px;
                                     spacing: 2px;
                                     HorizontalLayout {
@@ -474,12 +519,20 @@ export component AppWindow inherits Window {
                                     if !root.compact: StyledText { accessible-role: text; accessible-label: entry.detail; text: entry.detail-rich; default-color: Theme.muted; default-font-size: 11px; min-width: 0px; max-lines: 1; }
                                 }
                                 row-touch := TouchArea {
-                                    enabled: !root.busy && !root.ui-blocked;
+                                    enabled: !root.busy && !root.ui-blocked && !root.account-batch && !root.delete-confirm;
                                     mouse-cursor: pointer;
                                     clicked => { root.selected = index; root.focus-search(); }
                                     double-clicked => { if (!root.compact && !root.ui-blocked && !root.delete-confirm) { root.selected = index; root.edit-entry(); } }
                                     moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
                                     pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
+                                }
+                                if root.account-batch: CheckBox {
+                                    x: 12px; width: 28px; height: parent.height;
+                                    accessible-label: "选择账号 " + entry.title;
+                                    checked <=> entry.checked;
+                                    enabled: !root.ui-blocked && !root.delete-confirm;
+                                    toggled => { root.check-account(index, self.checked); }
+                                    changed has-focus => { if (self.has-focus) { root.selected = index; root.scroll-selected(); } }
                                 }
                             }
                             if root.entries.length == 0: SectionCard {
@@ -497,19 +550,33 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.status != "": StatusBanner { text: root.status; success: root.status-success; compact: root.compact; }
-                if root.delete-confirm: HorizontalLayout {
-                    spacing: 8px;
-                    Button { icon: @image-url("../assets/icons/trash.svg"); danger: true; primary: true; text: "确认删除"; enabled: !root.ui-blocked; clicked => { root.delete-entry(); } }
-                    Button { text: "取消删除"; clicked => { root.delete-confirm = false; root.status = ""; root.focus-search(); } }
-                    Rectangle { horizontal-stretch: 1; }
-                }
                 if !root.compact: Rectangle { height: 1px; background: Theme.line-subtle; }
-                if !root.compact: HorizontalLayout {
+                if root.delete-confirm || root.account-batch: HorizontalLayout {
+                    spacing: 8px;
+                    if root.delete-confirm: Button {
+                        text: "取消删除";
+                        init => { self.focus(); }
+                        clicked => { root.cancel-delete(); }
+                    }
+                    if root.account-batch && !root.delete-confirm: Button { text: "退出批量选择"; enabled: !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
+                    if root.account-batch: Text { text: "已选 " + root.account-checked + " 个账号"; color: Theme.muted; vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        icon: @image-url("../assets/icons/trash.svg");
+                        danger: true;
+                        primary: root.delete-confirm;
+                        text: root.delete-confirm ? "确认删除" : "删除所选账号";
+                        enabled: !root.ui-blocked && (root.delete-confirm || root.account-checked > 0);
+                        clicked => { root.delete-entry(); }
+                    }
+                }
+                if !root.compact && !root.account-batch && !root.delete-confirm: HorizontalLayout {
                     spacing: 8px;
                     Button { icon: @image-url("../assets/icons/settings.svg"); subtle: true; text: "设置"; enabled: !root.ui-blocked; clicked => { root.open-settings(); } }
                     Button { icon: @image-url("../assets/icons/archive.svg"); subtle: true; text: "备份管理"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
                     Rectangle { horizontal-stretch: 1; }
                     Button { text: "查看详情"; enabled: root.selected >= 0 && !root.ui-blocked && !root.delete-confirm; clicked => { root.view-entry(); } }
+                    Button { text: "批量选择"; enabled: root.entries.length > 0 && !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
                     Button { icon: @image-url("../assets/icons/lock.svg"); text: "锁定"; clicked => { root.lock-vault(); } }
                     more-button := Button { icon: @image-url("../assets/icons/more.svg"); subtle: true; text: "更多"; enabled: !root.ui-blocked; clicked => { root.app-menu-index = 0; root.app-menu-open = !root.app-menu-open; if (root.app-menu-open) { app-menu.focus(); } } }
                 }
@@ -868,6 +935,26 @@ export component AppWindow inherits Window {
                         SectionCard {
                             VerticalLayout {
                                 padding: 10px; spacing: 6px;
+                                Text { text: "默认备份目录"; font-size: 13px; font-weight: 600; color: Theme.ink; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    LineEdit {
+                                        horizontal-stretch: 1;
+                                        height: Theme.control-height;
+                                        accessible-label: "默认备份目录";
+                                        placeholder-text: "留空使用软件的备份目录";
+                                        text <=> root.backup-directory-choice;
+                                        enabled: !root.ui-blocked;
+                                        edited => { root.activity(); }
+                                    }
+                                    Button { text: "选择文件夹"; enabled: !root.ui-blocked; clicked => { root.choose-backup-directory(); } }
+                                }
+                                Text { text: "加密备份和恢复对话框从这里打开。保存或恢复时可选择其他位置。"; font-size: 12px; wrap: word-wrap; color: Theme.muted; }
+                            }
+                        }
+                        SectionCard {
+                            VerticalLayout {
+                                padding: 10px; spacing: 6px;
                                 Text { text: "密码库维护与关于"; font-size: 13px; font-weight: 600; color: Theme.ink; }
                                 HorizontalLayout {
                                     spacing: 8px;
@@ -974,7 +1061,7 @@ export component AppWindow inherits Window {
                         SectionCard {
                             VerticalLayout {
                                 padding: 12px; spacing: 8px;
-                                Text { text: root.backups-confirm ? "确认永久删除这 " + root.backup-count + " 个本地备份？此操作无法撤销，当前密码库会保留。需验证上方的当前主密码。" : "清除后，后续编辑或删除账号仍会按规则生成自动备份。普通删除不等于底层存储安全擦除。"; font-size: 12px; wrap: word-wrap; color: root.backups-confirm ? Theme.warning : Theme.muted; }
+                                Text { text: root.backups-confirm ? "确认永久删除这 " + root.backup-count + " 个受管本地备份？需验证上方的当前主密码。" : "清除受管备份后，编辑已有账号时仍会生成自动备份。"; font-size: 12px; wrap: word-wrap; color: root.backups-confirm ? Theme.warning : Theme.muted; }
                                 HorizontalLayout {
                                     spacing: 8px;
                                     alignment: start;
@@ -1012,42 +1099,57 @@ export component AppWindow inherits Window {
                         spacing: 2px;
                         padding-right: 116px;
                         Text { text: "备份管理"; font-size: 20px; font-weight: 700; color: Theme.ink; }
-                        Text { text: "共 " + root.backup-rows.length + " 份 · 按原始备份时间倒序 · 恢复始终切换到独立副本"; font-size: 12px; color: Theme.muted; }
+                        Text { text: "共 " + root.backup-rows.length + " 份 · 按备份时间倒序 · 恢复始终切换到独立副本"; font-size: 12px; color: Theme.muted; }
+                        Text { text: root.backup-directory-label; font-size: 12px; color: Theme.muted; overflow: elide; }
                     }
                     HorizontalLayout {
                         spacing: 8px;
-                        Button { icon: @image-url("../assets/icons/archive.svg"); text: "加密备份"; enabled: !root.ui-blocked; clicked => { root.backup(); } }
-                        Button { text: "恢复备份"; enabled: !root.ui-blocked; clicked => { root.restore(); } }
+                        Button { icon: @image-url("../assets/icons/archive.svg"); text: "加密备份"; enabled: !root.ui-blocked && !root.backup-batch && root.backup-confirm-mode == 0; clicked => { root.backup(); } }
+                        Button { text: "恢复备份"; enabled: !root.ui-blocked && !root.backup-batch && root.backup-confirm-mode == 0; clicked => { root.restore(); } }
                         Rectangle { horizontal-stretch: 1; }
-                        Button { icon: @image-url("../assets/icons/refresh.svg"); subtle: true; text: "刷新备份列表"; enabled: !root.ui-blocked; clicked => { root.refresh-backups(); } }
+                        Button { text: root.backup-batch ? "退出批量选择" : "批量选择"; enabled: !root.ui-blocked && root.backup-confirm-mode == 0 && (root.backup-batch || root.backup-rows.length > 0); clicked => { root.toggle-backup-batch(); } }
+                        Button { icon: @image-url("../assets/icons/refresh.svg"); subtle: true; text: "刷新备份列表"; enabled: !root.ui-blocked && root.backup-confirm-mode == 0; clicked => { root.refresh-backups(); } }
                     }
                     backups-view := ScrollView {
                         vertical-stretch: 1; content-width: self.visible-width;
                         VerticalLayout {
                             spacing: 8px;
                             for row[index] in root.backup-rows: Rectangle {
+                                property <bool> marked: root.backup-batch ? row.checked : index == root.selected-backup;
                                 height: 64px; border-radius: 10px; border-width: 1px;
-                                background: index == root.selected-backup ? Theme.selection : backup-touch.has-hover ? Theme.hover : Theme.surface;
-                                border-color: index == root.selected-backup ? Theme.selection-line : Theme.line-subtle;
+                                background: self.marked ? Theme.selection : backup-touch.has-hover ? Theme.hover : Theme.surface;
+                                border-color: self.marked ? Theme.selection-line : Theme.line-subtle;
                                 accessible-role: button; accessible-label: (index == root.selected-backup ? "已选择，" : "") + row.title + "，" + row.detail;
-                                accessible-action-default => { if (!root.ui-blocked) { root.selected-backup = index; } }
-                                if index == root.selected-backup: Rectangle { x: 0px; y: 12px; width: 3.5px; height: parent.height - 24px; border-radius: 2px; background: Theme.brand; }
+                                accessible-action-default => { if (!root.ui-blocked && root.backup-confirm-mode == 0) { root.selected-backup = index; } }
+                                if self.marked: Rectangle { x: 0px; y: 12px; width: 3.5px; height: parent.height - 24px; border-radius: 2px; background: Theme.brand; }
                                 VerticalLayout {
-                                    padding: 10px; padding-left: 14px; spacing: 4px;
+                                    padding: 10px; padding-left: root.backup-batch ? 43px : 14px; spacing: 4px;
                                     Text { text: row.title; color: Theme.ink; font-weight: 600; }
                                     Text { text: row.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
                                 }
-                                backup-touch := TouchArea { enabled: !root.ui-blocked; mouse-cursor: pointer; clicked => { root.selected-backup = index; } }
+                                backup-touch := TouchArea { enabled: !root.ui-blocked && !root.backup-batch && root.backup-confirm-mode == 0; mouse-cursor: pointer; clicked => { root.selected-backup = index; } }
+                                if root.backup-batch: CheckBox {
+                                    x: 12px; width: 28px; height: parent.height;
+                                    accessible-label: "选择备份 " + row.detail;
+                                    checked <=> row.checked;
+                                    enabled: !root.ui-blocked && root.backup-confirm-mode == 0;
+                                    toggled => { root.check-backup(index, self.checked); }
+                                    changed has-focus => { if (self.has-focus && root.backup-confirm-mode == 0) { root.selected-backup = index; root.scroll-backup-selected(); } }
+                                }
                             }
                             if root.backup-rows.length == 0: SectionCard {
                                 height: 56px;
                                 background: Theme.surface-muted;
-                                Text { x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center; text: "暂无本地备份。编辑或删除账号时会自动创建加密备份。"; color: Theme.muted; wrap: word-wrap; }
+                                Text { x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center; text: "暂无本地备份。编辑已有账号时会自动创建加密备份。"; color: Theme.muted; wrap: word-wrap; }
                             }
                         }
                     }
                     Text {
-                        text: root.backup-confirm-mode == 1 ? "确认永久删除选中的这一份备份？请输入当前密码库的主密码。删除无法撤销。" : root.backup-confirm-mode == 2 ? "请输入选中备份的主密码，再确认恢复。验证成功后切换到独立恢复副本。" : "选中一份备份后，可执行校验恢复或单份删除。";
+                        text: root.backup-confirm-mode == 1
+                            ? "确认永久删除选中的 " + root.backup-delete-count + " 份备份？请输入当前密码库的主密码。"
+                            : root.backup-confirm-mode == 2
+                                ? "请输入选中备份的主密码，再确认恢复。验证成功后切换到独立恢复副本。"
+                                : root.backup-batch ? "已选 " + root.backup-checked + " 份备份" : "选中一份备份后，可执行校验恢复或删除。";
                         font-size: 12.5px;
                         wrap: word-wrap;
                         color: root.backup-confirm-mode == 0 ? Theme.muted : Theme.warning;
@@ -1070,11 +1172,20 @@ export component AppWindow inherits Window {
                     Rectangle { height: 1px; background: Theme.line-subtle; }
                     HorizontalLayout {
                         spacing: 8px;
-                        Button { subtle: true; text: root.settings-open ? "返回设置" : "返回账号列表"; clicked => { root.close-backups(); } }
+                        Button { subtle: true; text: root.settings-open ? "返回设置" : "返回账号列表"; enabled: !root.working; clicked => { root.close-backups(); } }
                         Rectangle { horizontal-stretch: 1; }
-                        if root.backup-confirm-mode != 0: Button { text: "取消备份操作"; enabled: !root.ui-blocked; clicked => { root.backup-confirm-mode = 0; root.backup-master = ""; root.secret-serial += 1; root.status = ""; root.activity(); } }
-                        Button { icon: @image-url("../assets/icons/trash.svg"); danger: true; primary: root.backup-confirm-mode == 1; text: root.backup-confirm-mode == 1 ? "确认删除此备份" : "删除选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 2; clicked => { root.delete-backup(); } }
-                        Button { primary: root.backup-confirm-mode == 2; text: root.backup-confirm-mode == 2 ? "确认恢复此备份" : "恢复选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 1; clicked => { root.restore-backup(); } }
+                        if root.backup-confirm-mode != 0: Button { text: "取消备份操作"; enabled: !root.ui-blocked; clicked => { root.cancel-backup-operation(); root.activity(); } }
+                        Button {
+                            icon: @image-url("../assets/icons/trash.svg");
+                            danger: true; primary: root.backup-confirm-mode == 1;
+                            text: root.backup-confirm-mode == 1
+                                ? (root.backup-batch ? "确认删除所选备份" : "确认删除此备份")
+                                : "删除选中备份";
+                            enabled: !root.ui-blocked && root.backup-confirm-mode != 2
+                                && (root.backup-batch ? root.backup-checked > 0 : root.selected-backup >= 0);
+                            clicked => { root.delete-backup(); }
+                        }
+                        if !root.backup-batch: Button { primary: root.backup-confirm-mode == 2; text: root.backup-confirm-mode == 2 ? "确认恢复此备份" : "恢复选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 1; clicked => { root.restore-backup(); } }
                     }
                 }
             }

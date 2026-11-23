@@ -87,7 +87,7 @@ function Unlock([string]$password = 'GUI-Master-Only!2026') {
  Button '解锁'
  Pause 1500
 }
-function StartApp {
+function StartApp([switch]$NoFocus) {
  $script:process = Start-Process -FilePath $ExePath -PassThru -RedirectStandardError ($DataDir + '\stderr.log') -RedirectStandardOutput ($DataDir + '\stdout.log')
  $null = $script:process.Handle
  for ($i=0; $i -lt 80; $i++) {
@@ -96,6 +96,7 @@ function StartApp {
   try { $null = Main; break } catch { if ($i -eq 79) { throw } }
  }
  Pause 300
+ if ($NoFocus) {return}
  $edits = @(Edits)
  if ($edits.Count -gt 0) {
   $edits[0].SetFocus()

@@ -686,7 +686,14 @@ unsafe fn tray(window: HWND, action: u32) -> bool {
         data.uID = 1;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = TRAY_MESSAGE;
-        data.hIcon = LoadIconW(GetModuleHandleW(null_mut()), 1usize as *const u16);
+        data.hIcon = LoadImageW(
+            GetModuleHandleW(null_mut()),
+            1usize as *const u16,
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+            LR_SHARED,
+        );
         if data.hIcon.is_null() {
             data.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
         }
@@ -1220,49 +1227,85 @@ pub fn idle_expired(clock: &windows_password_manager::security::LockClock) -> bo
     }
 }
 
-pub fn choose_file(owner: usize, save: bool) -> Result<Option<std::path::PathBuf>, String> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows_sys::Win32::UI::Controls::Dialogs::*;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BackupDialog {
+    Save,
+    Restore,
+    Directory,
+}
+
+pub fn choose_backup_path(
+    owner: usize,
+    initial: &std::path::Path,
+    mode: BackupDialog,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            System::Com::{
+                CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+                CoTaskMemFree, CoUninitialize,
+            },
+            UI::Shell::{
+                Common::COMDLG_FILTERSPEC, FOS_DONTADDTORECENT, FOS_FORCEFILESYSTEM,
+                FOS_NOCHANGEDIR, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog, IFileDialog,
+                IShellItem, SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
+            },
+        },
+        core::{HRESULT, PCWSTR, w},
+    };
     unsafe {
-        let mut buffer = vec![0u16; 32768];
-        let filter = wide("加密密码库 (*.db)\0*.db\0所有文件\0*.*\0");
-        let title = wide(if save {
-            "保存加密备份（请选择新文件）"
-        } else {
-            "选择要恢复的加密备份"
-        });
-        let ext = wide("db");
-        let mut options: OPENFILENAMEW = zeroed();
-        options.lStructSize = size_of::<OPENFILENAMEW>() as u32;
-        options.hwndOwner = owner as HWND;
-        options.lpstrFilter = filter.as_ptr();
-        options.lpstrTitle = title.as_ptr();
-        options.lpstrFile = buffer.as_mut_ptr();
-        options.nMaxFile = buffer.len() as u32;
-        options.lpstrDefExt = ext.as_ptr();
-        options.Flags = OFN_EXPLORER
-            | OFN_NOCHANGEDIR
-            | OFN_PATHMUSTEXIST
-            | if save {
-                OFN_OVERWRITEPROMPT
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok()
+            .map_err(|_| "无法初始化 Windows 文件选择器。")?;
+        let result = (|| -> windows::core::Result<_> {
+            let class = if mode == BackupDialog::Save {
+                &FileSaveDialog
             } else {
-                OFN_FILEMUSTEXIST
+                &FileOpenDialog
             };
-        let selected = if save {
-            GetSaveFileNameW(&mut options)
-        } else {
-            GetOpenFileNameW(&mut options)
-        };
-        if selected == 0 {
-            let code = CommDlgExtendedError();
-            return if code == 0 {
-                Ok(None)
+            let dialog: IFileDialog = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
+            let mut flags =
+                dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT;
+            if mode == BackupDialog::Directory {
+                flags |= FOS_PICKFOLDERS;
             } else {
-                Err(format!("文件选择失败（{code}）。"))
-            };
-        }
-        let end = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-        Ok(Some(std::ffi::OsString::from_wide(&buffer[..end]).into()))
+                dialog.SetFileTypes(&[
+                    COMDLG_FILTERSPEC {
+                        pszName: w!("加密密码库 (*.db)"),
+                        pszSpec: w!("*.db"),
+                    },
+                    COMDLG_FILTERSPEC {
+                        pszName: w!("所有文件"),
+                        pszSpec: w!("*.*"),
+                    },
+                ])?;
+                dialog.SetDefaultExtension(w!("db"))?;
+            }
+            dialog.SetOptions(flags)?;
+            dialog.SetTitle(match mode {
+                BackupDialog::Save => w!("保存加密备份（请选择新文件）"),
+                BackupDialog::Restore => w!("选择要恢复的加密备份"),
+                BackupDialog::Directory => w!("选择默认备份目录"),
+            })?;
+            let path: Vec<_> = initial.as_os_str().encode_wide().chain([0]).collect();
+            let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)?;
+            dialog.SetFolder(&folder)?;
+            if let Err(error) = dialog.Show(Some(HWND(owner as _))) {
+                return if error.code() == HRESULT::from_win32(1223) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                };
+            }
+            let name = dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let selected = std::ffi::OsString::from_wide(name.as_wide()).into();
+            CoTaskMemFree(Some(name.0.cast()));
+            Ok(Some(selected))
+        })();
+        CoUninitialize();
+        result.map_err(|error| format!("无法选择备份路径（{}）。", error.code()))
     }
 }
 

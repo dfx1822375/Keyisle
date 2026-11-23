@@ -2,12 +2,12 @@
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Drawing
 $frames=@()
-foreach($size in @(256,128,64,48,32,24,20,16)){
+foreach($size in @(512,256,128,96,72,64,48,40,32,24,20,16)){
  $bitmap=[Drawing.Bitmap]::new($size,$size,[Drawing.Imaging.PixelFormat]::Format32bppArgb)
  $graphics=[Drawing.Graphics]::FromImage($bitmap)
  $path=[Drawing.Drawing2D.GraphicsPath]::new()
  $brush=[Drawing.SolidBrush]::new([Drawing.ColorTranslator]::FromHtml('#11675f'))
- $pen=[Drawing.Pen]::new([Drawing.Color]::White,3.5)
+ $pen=[Drawing.Pen]::new([Drawing.Color]::White,$(if($size -le 24){4.5}else{3.5}))
  $stream=[IO.MemoryStream]::new()
  try{
   $graphics.Clear([Drawing.Color]::Transparent)
@@ -20,17 +20,20 @@ foreach($size in @(256,128,64,48,32,24,20,16)){
   $pen.StartCap=[Drawing.Drawing2D.LineCap]::Round;$pen.EndCap=[Drawing.Drawing2D.LineCap]::Round
   $graphics.DrawEllipse($pen,16.5,15.5,15,15)
   $dot=[Drawing.SolidBrush]::new([Drawing.Color]::White)
-  $graphics.FillEllipse($dot,20.9,19.9,3.2,3.2)
+  if($size -ge 32){$graphics.FillEllipse($dot,20.9,19.9,3.2,3.2)}
   $dot.Dispose()
   $graphics.DrawLine($pen,29.5,28.5,44,43);$graphics.DrawLine($pen,36.5,35.5,40.7,31.3);$graphics.DrawLine($pen,41.5,40.5,45.7,36.3)
   $graphics.DrawBezier($pen,13,46.5,20.5,53,43.5,53,51,46.5)
   $wavePen=[Drawing.Pen]::new([Drawing.Color]::FromArgb(184,255,255,255),2.4)
   $wavePen.StartCap=[Drawing.Drawing2D.LineCap]::Round;$wavePen.EndCap=[Drawing.Drawing2D.LineCap]::Round
-  $graphics.DrawBezier($wavePen,20,51.5,25.5,54.7,38.5,54.7,44,51.5)
+  if($size -ge 32){$graphics.DrawBezier($wavePen,20,51.5,25.5,54.7,38.5,54.7,44,51.5)}
   $wavePen.Dispose()
-  $bitmap.Save($stream,[Drawing.Imaging.ImageFormat]::Png)
-  $frames+=,@{Size=$size;Bytes=$stream.ToArray()}
-  if($size -eq 256){$bitmap.Save((Join-Path $Destination 'keyisle-preview.png'),[Drawing.Imaging.ImageFormat]::Png)}
+  if($size -eq 512){
+   $bitmap.Save((Join-Path $Destination 'keyisle-preview.png'),[Drawing.Imaging.ImageFormat]::Png)
+  }else{
+   $bitmap.Save($stream,[Drawing.Imaging.ImageFormat]::Png)
+   $frames+=,@{Size=$size;Bytes=$stream.ToArray()}
+  }
  }finally{$graphics.Dispose();$bitmap.Dispose();$pen.Dispose();$brush.Dispose();$path.Dispose();$stream.Dispose()}
 }
 $file=[IO.File]::Create((Join-Path $Destination 'keyisle.ico'))
@@ -46,21 +49,23 @@ try{
  }
  foreach($frame in $frames){$writer.Write([byte[]]$frame.Bytes)}
 }finally{$writer.Dispose();$file.Dispose()}
-Write-Output 'Generated Keyisle icon: 16, 20, 24, 32, 48, 64, 128 and 256 pixels.'
+Write-Output 'Generated Keyisle icon with 11 DPI-specific frames and a 512 px preview.'
 
-$banner=[Drawing.Bitmap]::new(164,314,[Drawing.Imaging.PixelFormat]::Format24bppRgb)
+# NSIS scales its sidebar to the dialog. Start with a 3x image for high-DPI Windows.
+$scale=3
+$banner=[Drawing.Bitmap]::new((164*$scale),(314*$scale),[Drawing.Imaging.PixelFormat]::Format24bppRgb)
 $canvas=[Drawing.Graphics]::FromImage($banner)
 $logo=[Drawing.Image]::FromFile((Join-Path $Destination 'keyisle-preview.png'))
 $titleFont=[Drawing.Font]::new('Segoe UI',18,[Drawing.FontStyle]::Bold)
-$smallFont=[Drawing.Font]::new('Segoe UI',7)
 $ink=[Drawing.SolidBrush]::new([Drawing.ColorTranslator]::FromHtml('#183431'))
-$muted=[Drawing.SolidBrush]::new([Drawing.ColorTranslator]::FromHtml('#61747c'))
 $format=[Drawing.StringFormat]::new();$format.Alignment=[Drawing.StringAlignment]::Center
 try{
  $canvas.Clear([Drawing.ColorTranslator]::FromHtml('#f7f9fb'))
+ $canvas.ScaleTransform($scale,$scale)
  $canvas.InterpolationMode=[Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
- $canvas.DrawImage($logo,40,78,84,84)
- $canvas.DrawString('Keyisle',$titleFont,$ink,[Drawing.RectangleF]::new(0,180,164,38),$format)
- $canvas.DrawString('LOCAL PASSWORD VAULT',$smallFont,$muted,[Drawing.RectangleF]::new(0,226,164,24),$format)
+ $canvas.PixelOffsetMode=[Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+ $canvas.TextRenderingHint=[Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+ $canvas.DrawImage($logo,34,78,96,96)
+ $canvas.DrawString('Keyisle',$titleFont,$ink,[Drawing.RectangleF]::new(0,190,164,38),$format)
  $banner.Save((Join-Path $Destination 'keyisle-installer.bmp'),[Drawing.Imaging.ImageFormat]::Bmp)
-}finally{$canvas.Dispose();$banner.Dispose();$logo.Dispose();$titleFont.Dispose();$smallFont.Dispose();$ink.Dispose();$muted.Dispose();$format.Dispose()}
+}finally{$canvas.Dispose();$banner.Dispose();$logo.Dispose();$titleFont.Dispose();$ink.Dispose();$format.Dispose()}

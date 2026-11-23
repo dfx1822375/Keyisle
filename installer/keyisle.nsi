@@ -49,17 +49,87 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Keyisle contributors"
 !define MUI_UNWELCOMEPAGE_TITLE "卸载 Keyisle"
 !define MUI_UNWELCOMEPAGE_TEXT "仅移除程序、快捷方式和开机启动登记。密码库、备份及偏好会保留。$\r$\n$\r$\n如需彻底清空软件管理的数据，请先在应用设置中使用“一键还原”。"
 
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW KeyisleWelcomeImage
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW KeyisleFinishImage
 !insertmacro MUI_PAGE_FINISH
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.KeyisleWelcomeImage
 !insertmacro MUI_UNPAGE_WELCOME
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW un.KeyisleFinishImage
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "SimpChinese"
 SetFont /LANG=${LANG_SIMPCHINESE} "Microsoft YaHei UI" 9
+
+; MUI's LoadImage scaling drops source pixels. Replace it with a halftone blit at the actual control size.
+!macro KeyisleWizardImage FUNCTION CONTROL BITMAP
+Function ${FUNCTION}
+ System::Store "S"
+ System::Call 'user32::LoadImageW(p0, w "$PLUGINSDIR\modern-wizard.bmp", i0, i0, i0, i0x10)p.r0'
+ ${If} $0 != 0
+  System::Alloc 32
+  Pop $5
+  StrCpy $6 0
+  ${If} $5 != 0
+   System::Call 'gdi32::GetObjectW(pr0, i32, pr5)i.r6'
+  ${EndIf}
+  ${If} $6 != 0
+   System::Call '*$5(i, i.r6, i.r7)'
+   StrCpy $R0 $6
+   StrCpy $R1 $7
+   System::Call 'user32::GetClientRect(p${CONTROL}, pr5)i.r6'
+   ${If} $6 != 0
+    System::Call '*$5(i, i, i.r8, i.r9)'
+    System::Call 'user32::GetDC(p${CONTROL})p.r1'
+    ${If} $1 != 0
+     System::Call 'gdi32::CreateCompatibleDC(pr1)p.r2'
+     System::Call 'gdi32::CreateCompatibleDC(pr1)p.r3'
+     System::Call 'gdi32::CreateCompatibleBitmap(pr1, ir8, ir9)p.r4'
+     ${If} $2 != 0
+     ${AndIf} $3 != 0
+     ${AndIf} $4 != 0
+      System::Call 'gdi32::SelectObject(pr2, pr0)p.r6'
+      System::Call 'gdi32::SelectObject(pr3, pr4)p.r7'
+      ${If} $6 != 0
+      ${AndIf} $7 != 0
+       System::Call 'gdi32::SetStretchBltMode(pr3, i4)'
+       System::Call 'gdi32::SetBrushOrgEx(pr3, i0, i0, p0)'
+       System::Call 'gdi32::StretchBlt(pr3, i0, i0, ir8, ir9, pr2, i0, i0, i$R0, i$R1, i0x00CC0020)i.s'
+       Pop $R2
+      ${Else}
+       StrCpy $R2 0
+      ${EndIf}
+      System::Call 'gdi32::SelectObject(pr2, pr6)'
+      System::Call 'gdi32::SelectObject(pr3, pr7)'
+      ${If} $R2 != 0
+       SendMessage ${CONTROL} ${STM_SETIMAGE} 0 $4
+       System::Call 'gdi32::DeleteObject(p${BITMAP})'
+       StrCpy ${BITMAP} $4
+       StrCpy $4 0
+      ${EndIf}
+     ${EndIf}
+     System::Call 'gdi32::DeleteDC(pr2)'
+     System::Call 'gdi32::DeleteDC(pr3)'
+     System::Call 'gdi32::DeleteObject(pr4)'
+     System::Call 'user32::ReleaseDC(p${CONTROL}, pr1)'
+    ${EndIf}
+   ${EndIf}
+  ${EndIf}
+  System::Free $5
+  System::Call 'gdi32::DeleteObject(pr0)'
+ ${EndIf}
+ System::Store "L"
+FunctionEnd
+!macroend
+
+!insertmacro KeyisleWizardImage KeyisleWelcomeImage $mui.WelcomePage.Image $mui.WelcomePage.Image.Bitmap
+!insertmacro KeyisleWizardImage KeyisleFinishImage $mui.FinishPage.Image $mui.FinishPage.Image.Bitmap
+!insertmacro KeyisleWizardImage un.KeyisleWelcomeImage $mui.WelcomePage.Image $mui.WelcomePage.Image.Bitmap
+!insertmacro KeyisleWizardImage un.KeyisleFinishImage $mui.FinishPage.Image $mui.FinishPage.Image.Bitmap
 
 Var OldInstallDir
 

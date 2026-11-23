@@ -406,9 +406,21 @@ impl Vault {
     }
 
     pub fn delete(&mut self, id: i64) -> Result<()> {
+        self.delete_many(&[id])
+    }
+
+    pub fn delete_many(&mut self, ids: &[i64]) -> Result<()> {
+        if ids.is_empty() {
+            return Err("请先选择要删除的账号。".into());
+        }
         let tx = db(self.conn.transaction())?;
-        if db(tx.execute("DELETE FROM credentials WHERE id=?1", [id]))? != 1 {
-            return Err("账号已不存在。".into());
+        {
+            let mut delete = db(tx.prepare("DELETE FROM credentials WHERE id=?1"))?;
+            for id in ids {
+                if db(delete.execute([id]))? != 1 {
+                    return Err("账号已不存在，请刷新后重试。".into());
+                }
+            }
         }
         db(tx.commit())
     }
@@ -452,6 +464,34 @@ impl Vault {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_delete_rolls_back_when_an_id_is_missing() {
+        let root = std::env::temp_dir().join(format!("batch-delete-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut vault = super::Vault::create(&root.join("vault.db"), "Batch-Only!2026").unwrap();
+        let first = vault
+            .save(&super::Credential {
+                title: "First".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let second = vault
+            .save(&super::Credential {
+                title: "Second".into(),
+                sensitive: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(vault.delete_many(&[first, i64::MAX, second]).is_err());
+        assert_eq!(vault.list().unwrap().len(), 2);
+        assert!(vault.delete_many(&[first, first]).is_err());
+        assert_eq!(vault.list().unwrap().len(), 2);
+        vault.delete_many(&[first, second]).unwrap();
+        assert!(vault.list().unwrap().is_empty());
+        drop(vault);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn application_usage_is_scoped_persistent_and_cascades_on_delete() {
         let root =

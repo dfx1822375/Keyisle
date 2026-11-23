@@ -3,7 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILES: [&str; 7] = [
+const BACKUP_DIRECTORY: &str = "backup-directory.txt";
+const FILES: [&str; 8] = [
     "shortcut.txt",
     "lock-settings.txt",
     "launch-settings.txt",
@@ -11,7 +12,55 @@ const FILES: [&str; 7] = [
     "appearance.txt",
     "screen-protection.txt",
     "auto-update.txt",
+    BACKUP_DIRECTORY,
 ];
+
+pub fn backup_directory(root: &Path) -> Result<PathBuf, String> {
+    match fs::read_to_string(root.join(BACKUP_DIRECTORY)) {
+        Ok(value) if value.is_empty() => Ok(root.join("backups")),
+        Ok(value) => backup_path(&value),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(root.join("backups")),
+        Err(_) => Err("无法读取默认备份目录设置。".into()),
+    }
+}
+
+pub fn backup_dialog_directory(root: &Path) -> Result<PathBuf, String> {
+    let configured = backup_directory(root)?;
+    if backup_folder_available(&configured) {
+        return Ok(configured);
+    }
+    let fallback = root.join("backups");
+    fs::create_dir_all(&fallback).map_err(|_| "无法打开默认或本地备份目录。")?;
+    if !backup_folder_available(&fallback) {
+        return Err("无法打开默认或本地备份目录。".into());
+    }
+    Ok(fallback)
+}
+
+pub fn backup_folder_available(path: &Path) -> bool {
+    crate::maintenance::regular(path, true).is_ok() && fs::read_dir(path).is_ok()
+}
+
+pub fn save_backup_directory(root: &Path, value: &str) -> Result<(), String> {
+    if !value.is_empty() {
+        let directory = backup_path(value)?;
+        if directory != root.join("backups") && !backup_folder_available(&directory) {
+            return Err("无法打开所选备份目录，请选择可访问的文件夹。".into());
+        }
+    }
+    let temporary = root.join("backup-directory.tmp");
+    fs::write(&temporary, value)
+        .and_then(|_| fs::rename(&temporary, root.join(BACKUP_DIRECTORY)))
+        .map_err(|_| "无法保存默认备份目录设置。".into())
+}
+
+fn backup_path(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if value.len() > 32768 || !path.is_absolute() || value.chars().any(char::is_control) {
+        return Err("默认备份目录无效，请选择一个文件夹。".into());
+    }
+    Ok(path)
+}
 
 pub fn load_theme(root: &Path) -> Result<i32, String> {
     match fs::read_to_string(root.join("theme.txt")) {

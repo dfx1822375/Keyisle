@@ -1,10 +1,10 @@
-use crate::platform::{self, Event, Native, Target};
+use crate::platform::{self, BackupDialog, Event, Native, Target};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
 use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -21,6 +21,7 @@ use windows_password_manager::{
         generate_password,
     },
     session::Session,
+    settings,
     shortcut::Shortcut,
     startup,
     update::{self, CheckOutcome, PreparedUpdate, UpdateManifest},
@@ -68,13 +69,17 @@ struct State {
     grant: Option<Grant>,
     editor_verified: Option<(i64, u64)>,
     editing_id: i64,
-    deleting_id: i64,
+    delete_request: u64,
+    deleting_ids: Vec<i64>,
+    account_checks: BTreeSet<i64>,
     target: Option<Target>,
     target_application: String,
     details_id: Option<i64>,
     matches: Vec<i64>,
     pending: Option<Pending>,
     backup_paths: Vec<PathBuf>,
+    backup_checks: BTreeSet<PathBuf>,
+    backup_sources: Vec<PathBuf>,
     context_record: Option<(i64, u64)>,
 }
 
@@ -135,6 +140,8 @@ fn clear_maintenance(ui: &AppWindow) {
 
 fn clear_backup_list(ui: &AppWindow) {
     ui.set_backups_open(false);
+    ui.set_backup_batch(false);
+    ui.set_backup_checked(0);
     ui.set_backup_master("".into());
     ui.set_backup_confirm_mode(0);
     ui.set_selected_backup(-1);
@@ -149,7 +156,21 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
         .cloned();
     let session = state.session.borrow();
     let backups = maintenance::backup_list(&session.root, &session.path)?;
+    let directory = settings::backup_directory(&session.root)?;
+    ui.set_backup_directory_label(
+        if directory != session.root.join("backups")
+            && !settings::backup_folder_available(&directory)
+        {
+            format!("默认目录不可用：{}", directory.display())
+        } else {
+            format!("默认目录：{}", directory.display())
+        }
+        .into(),
+    );
     let inactive = maintenance::inactive_vault_count(&session.root, &session.path);
+    state
+        .backup_checks
+        .retain(|path| ui.get_backup_batch() && backups.iter().any(|backup| backup.path == *path));
     let rows: Vec<_> = backups
         .iter()
         .map(|entry| BackupRow {
@@ -160,9 +181,12 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
                 entry.path.file_name().unwrap().to_string_lossy()
             )
             .into(),
+            checked: state.backup_checks.contains(&entry.path),
         })
         .collect();
     state.backup_paths = backups.into_iter().map(|b| b.path).collect();
+    state.backup_sources.clear();
+    ui.set_backup_checked(state.backup_checks.len() as i32);
     ui.set_backup_rows(ModelRc::new(VecModel::from(rows)));
     ui.set_backup_count(state.backup_paths.len() as i32);
     ui.set_inactive_vault_count(inactive as i32);
@@ -303,6 +327,18 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     let unlocked = session.vault.is_some();
     drop(session);
 
+    if !unlocked {
+        ui.set_account_batch(false);
+        state.deleting_ids.clear();
+        state.backup_paths.clear();
+        state.backup_checks.clear();
+        state.backup_sources.clear();
+    }
+    if !ui.get_account_batch() {
+        state.account_checks.clear();
+    }
+    ui.set_account_checked(state.account_checks.len() as i32);
+
     ranked.sort_by(|(a_score, a), (b_score, b)| {
         b_score
             .cmp(a_score)
@@ -404,6 +440,7 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             username: username.into(),
             detail: detail.into(),
             sensitive: record.sensitive,
+            checked: state.account_checks.contains(&record.id),
         });
     }
     ui.set_categories(ModelRc::new(VecModel::from(
@@ -459,7 +496,7 @@ enum JobResult {
     Maintenance(Result<String, String>),
     Backup {
         generation: u64,
-        result: Result<Option<(Vault, PathBuf)>, String>,
+        result: Result<BackupOutcome, String>,
     },
     Verify {
         panel: usize,
@@ -481,6 +518,11 @@ enum JobResult {
         serial: u64,
         result: Result<PreparedUpdate, String>,
     },
+}
+
+enum BackupOutcome {
+    Restored(Vault, PathBuf),
+    Deleted(usize),
 }
 
 struct UpdateController {
@@ -570,15 +612,32 @@ fn authorize(ui: &AppWindow, state: &mut State, action: ProtectedAction) -> bool
         ui.set_status("请先完成或取消当前验证。".into());
         return false;
     }
-    let result = {
+    let result = (|| {
         let session = state.session.borrow();
         let vault = session.vault.as_ref().unwrap();
-        vault.is_sensitive(action.record()).and_then(|sensitive| {
-            vault
-                .title(action.record())
-                .map(|title| (sensitive, title, session.generation))
-        })
-    };
+        let (sensitive, title) = if let Some(id) = action.record() {
+            (vault.is_sensitive(id)?, vault.title(id)?)
+        } else {
+            if action != ProtectedAction::Delete(state.delete_request)
+                || state.deleting_ids.is_empty()
+            {
+                return Err("删除请求已失效，请重新选择。".into());
+            }
+            let sensitive = state
+                .deleting_ids
+                .iter()
+                .try_fold(false, |sensitive, &id| {
+                    vault.is_sensitive(id).map(|current| current || sensitive)
+                })?;
+            let title = if state.deleting_ids.len() == 1 {
+                vault.title(state.deleting_ids[0])?
+            } else {
+                format!("已选 {} 个账号", state.deleting_ids.len())
+            };
+            (sensitive, title)
+        };
+        Ok::<_, String>((sensitive, title, session.generation))
+    })();
     let (sensitive, title, generation) = match result {
         Ok(value) => value,
         Err(message) => {
@@ -656,7 +715,12 @@ fn cancel(ui: &AppWindow, state: &mut State, timer: &Timer, popup_watch: Option<
     ui.set_context_open(false);
     ui.set_app_menu_open(false);
     clear_maintenance(ui);
+    ui.set_account_batch(false);
     state.pending = None;
+    state.deleting_ids.clear();
+    state.backup_paths.clear();
+    state.backup_checks.clear();
+    state.backup_sources.clear();
     state.target = None;
     state.target_application.clear();
     state.details_id = None;
@@ -722,8 +786,12 @@ fn bind(
         matches: Vec::new(),
         pending: None,
         editing_id: 0,
-        deleting_id: 0,
+        delete_request: 0,
+        deleting_ids: Vec::new(),
+        account_checks: BTreeSet::new(),
         backup_paths: Vec::new(),
+        backup_checks: BTreeSet::new(),
+        backup_sources: Vec::new(),
         context_record: None,
     }));
     let timer = Rc::new(Timer::default());
@@ -799,9 +867,11 @@ fn bind(
         let state = state.clone();
         ui.on_search_changed(move || {
             if let Some(ui) = weak.upgrade() {
-                state.borrow().clock.touch();
-                state.borrow_mut().matches.clear();
-                refresh(&ui, &mut state.borrow_mut());
+                let mut state = state.borrow_mut();
+                state.clock.touch();
+                state.matches.clear();
+                state.account_checks.clear();
+                refresh(&ui, &mut state);
                 ui.invoke_scroll_selected();
             }
         });
@@ -1268,6 +1338,46 @@ fn bind(
     {
         let weak = ui.as_weak();
         let state = state.clone();
+        ui.on_toggle_account_batch(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            if ui.get_compact() || ui.get_delete_confirm() || !available(&state) {
+                return;
+            }
+            state.account_checks.clear();
+            ui.set_account_batch(!ui.get_account_batch());
+            ui.set_status("".into());
+            state.clock.touch();
+            refresh(&ui, &mut state);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_check_account(move |index, checked| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            if !ui.get_account_batch() || ui.get_delete_confirm() || !available(&state) {
+                return;
+            }
+            if let Some(&id) = state.matches.get(index as usize) {
+                if checked {
+                    state.account_checks.insert(id);
+                } else {
+                    state.account_checks.remove(&id);
+                }
+                ui.set_account_checked(state.account_checks.len() as i32);
+                state.clock.touch();
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
         ui.on_delete_entry(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1278,46 +1388,58 @@ fn bind(
             }
             state.clock.touch();
             if !ui.get_delete_confirm() {
-                let Some(id) = selected_id(&ui, &state) else {
-                    return;
+                let ids: Vec<_> = if ui.get_account_batch() {
+                    state.account_checks.iter().copied().collect()
+                } else {
+                    selected_id(&ui, &state).into_iter().collect()
                 };
-                state.deleting_id = id;
-                let title = state
-                    .session
-                    .borrow()
-                    .vault
-                    .as_ref()
-                    .and_then(|v| v.title(id).ok())
-                    .unwrap_or_default();
+                if ids.is_empty() {
+                    return;
+                }
+                let subject = if ids.len() == 1 && !ui.get_account_batch() {
+                    let session = state.session.borrow();
+                    match session.vault.as_ref().unwrap().title(ids[0]) {
+                        Ok(title) => format!("账号「{title}」"),
+                        Err(message) => {
+                            ui.set_status(message.into());
+                            return;
+                        }
+                    }
+                } else {
+                    format!("选中的 {} 个账号", ids.len())
+                };
+                state.deleting_ids = ids;
+                state.delete_request = state.delete_request.wrapping_add(1);
                 ui.set_delete_confirm(true);
-                ui.set_status(
-                    format!("再次点击确认删除「{title}」。删除前会创建加密备份。").into(),
-                );
+                ui.set_status(format!("确认删除{subject}？本次删除不会创建新的加密备份。").into());
                 return;
             }
-            let id = state.deleting_id;
-            if !authorize(&ui, &mut state, ProtectedAction::Delete(id)) {
+            let action = ProtectedAction::Delete(state.delete_request);
+            if !authorize(&ui, &mut state, action) {
                 drop(state);
                 ui.invoke_session_changed();
                 ui.invoke_focus_search();
                 return;
             }
+            let count = state.deleting_ids.len();
             let result = (|| {
                 let mut session = state.session.borrow_mut();
-                session.backup_before_change()?;
                 session
                     .vault
                     .as_mut()
                     .ok_or("密码库已锁定。".to_string())?
-                    .delete(state.deleting_id)?;
+                    .delete_many(&state.deleting_ids)?;
                 session.invalidate_cache();
                 Ok::<_, String>(())
             })();
-            drop(state);
             match result {
                 Ok(()) => {
-                    success(&ui, "已删除，自动备份保留在用户数据目录。".into());
+                    state.deleting_ids.clear();
+                    state.account_checks.clear();
+                    drop(state);
+                    success(&ui, format!("已删除 {count} 个账号。"));
                     ui.invoke_session_changed();
+                    ui.invoke_focus_search();
                 }
                 Err(message) => ui.set_status(message.into()),
             }
@@ -1441,6 +1563,11 @@ fn bind(
                 return;
             }
             let root = state.borrow().session.borrow().root.clone();
+            let backup_directory = match settings::backup_directory(&root) {
+                Ok(path) => path.to_string_lossy().into_owned(),
+                Err(_) => String::new(),
+            };
+            ui.set_backup_directory_choice(backup_directory.into());
             let shortcut = Shortcut::load(&root);
             match shortcut {
                 Ok(shortcut) => ui.set_shortcut_input(shortcut.to_string().into()),
@@ -1497,6 +1624,41 @@ fn bind(
             state.borrow().clock.touch();
         });
     }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_choose_backup_directory(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            if !available(&state.borrow()) || !ui.get_settings_open() {
+                return;
+            }
+            let root = state.borrow().session.borrow().root.clone();
+            let draft = PathBuf::from(ui.get_backup_directory_choice().as_str());
+            let result = (|| {
+                let initial = if draft.is_absolute() && settings::backup_folder_available(&draft) {
+                    draft
+                } else {
+                    settings::backup_dialog_directory(&root)?
+                };
+                if let Some(folder) = platform::choose_backup_path(
+                    window_id(&ui)?,
+                    &initial,
+                    BackupDialog::Directory,
+                )? && available(&state.borrow())
+                    && ui.get_settings_open()
+                {
+                    ui.set_backup_directory_choice(folder.to_string_lossy().as_ref().into());
+                    state.borrow().clock.touch();
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(message) = result {
+                ui.set_status(message.into());
+            }
+        });
+    }
 
     {
         let weak = ui.as_weak();
@@ -1523,6 +1685,48 @@ fn bind(
     {
         let weak = ui.as_weak();
         let state = state.clone();
+        ui.on_toggle_backup_batch(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            if !available(&state) || !ui.get_backups_open() || ui.get_backup_confirm_mode() != 0 {
+                return;
+            }
+            state.backup_checks.clear();
+            ui.set_backup_batch(!ui.get_backup_batch());
+            state.clock.touch();
+            match refresh_backups(&ui, &mut state) {
+                Ok(()) => ui.set_status("".into()),
+                Err(message) => ui.set_status(message.into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_check_backup(move |index, checked| {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            if !available(&state) || !ui.get_backup_batch() || ui.get_backup_confirm_mode() != 0 {
+                return;
+            }
+            if let Some(path) = state.backup_paths.get(index as usize).cloned() {
+                if checked {
+                    state.backup_checks.insert(path);
+                } else {
+                    state.backup_checks.remove(&path);
+                }
+                ui.set_backup_checked(state.backup_checks.len() as i32);
+                state.clock.touch();
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
         ui.on_refresh_backups(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -1544,10 +1748,16 @@ fn bind(
             let Some(ui) = weak.upgrade() else {
                 return;
             };
-            state.borrow().auth_cancel.store(true, Ordering::SeqCst);
+            if ui.get_working() {
+                return;
+            }
+            let mut state = state.borrow_mut();
+            state.backup_paths.clear();
+            state.backup_checks.clear();
+            state.backup_sources.clear();
             clear_backup_list(&ui);
             ui.set_status("".into());
-            state.borrow().clock.touch();
+            state.clock.touch();
         });
     }
     for restore in [false, true] {
@@ -1561,23 +1771,45 @@ fn bind(
             if !available(&state.borrow()) || !ui.get_backups_open() {
                 return;
             }
-            let source = usize::try_from(ui.get_selected_backup())
-                .ok()
-                .and_then(|index| state.borrow().backup_paths.get(index).cloned());
-            let Some(source) = source else {
-                ui.set_status("请先选择一份备份。".into());
+            let batch = ui.get_backup_batch();
+            if restore && batch {
                 return;
-            };
+            }
             let mode = if restore { 2 } else { 1 };
             if ui.get_backup_confirm_mode() != mode {
+                let mut state = state.borrow_mut();
+                let sources: Vec<_> = if batch {
+                    state.backup_checks.iter().cloned().collect()
+                } else {
+                    state
+                        .backup_paths
+                        .get(ui.get_selected_backup() as usize)
+                        .cloned()
+                        .into_iter()
+                        .collect()
+                };
+                if sources.is_empty() {
+                    ui.set_status("请先选择要操作的备份。".into());
+                    return;
+                }
+                if sources.len() == 1 && !batch {
+                    ui.set_status(
+                        format!(
+                            "选中：{}",
+                            sources[0].file_name().unwrap().to_string_lossy()
+                        )
+                        .into(),
+                    );
+                } else {
+                    ui.set_status("".into());
+                }
+                ui.set_backup_delete_count(sources.len() as i32);
+                state.backup_sources = sources;
                 ui.set_backup_confirm_mode(mode);
                 ui.set_backup_master("".into());
                 reset_secret_masks(&ui);
-                ui.set_status(
-                    format!("选中：{}", source.file_name().unwrap().to_string_lossy()).into(),
-                );
                 ui.invoke_focus_search();
-                state.borrow().clock.touch();
+                state.clock.touch();
                 return;
             }
             let master = Zeroizing::new(ui.get_backup_master().to_string());
@@ -1588,15 +1820,22 @@ fn bind(
                 return;
             }
             let cancel = Arc::new(AtomicBool::new(false));
-            let (root, active, generation) = {
+            let (root, active, generation, sources) = {
                 let mut state = state.borrow_mut();
+                if state.backup_sources.is_empty() {
+                    ui.set_backup_confirm_mode(0);
+                    ui.set_status("所选备份已变化，请重新选择。".into());
+                    return;
+                }
                 state.auth_cancel = cancel.clone();
+                let sources = state.backup_sources.clone();
                 let mut session = state.session.borrow_mut();
                 session.working = true;
                 (
                     session.root.clone(),
                     session.path.clone(),
                     session.generation,
+                    sources,
                 )
             };
             ui.invoke_session_changed();
@@ -1604,10 +1843,11 @@ fn bind(
             let jobs = jobs.clone();
             std::thread::spawn(move || {
                 let result = if restore {
-                    maintenance::restore_backup(&root, &active, &source, &master, &cancel).map(Some)
+                    maintenance::restore_backup(&root, &active, &sources[0], &master, &cancel)
+                        .map(|(vault, path)| BackupOutcome::Restored(vault, path))
                 } else {
-                    maintenance::delete_backup(&root, &active, &source, &master, &cancel)
-                        .map(|_| None)
+                    maintenance::delete_backups(&root, &active, &sources, &master, &cancel)
+                        .map(BackupOutcome::Deleted)
                 };
                 jobs.send(JobResult::Backup { generation, result });
             });
@@ -2009,6 +2249,8 @@ fn bind(
             };
             if !available(&state.borrow())
                 || ui.get_editing()
+                || ui.get_account_batch()
+                || ui.get_delete_confirm()
                 || ui.get_settings_open()
                 || ui.get_maintenance_open()
                 || ui.get_backups_open()
@@ -2964,7 +3206,12 @@ pub fn run() -> Result<(), String> {
                     );
                 }
                 let result = (|| {
-                    let selected = platform::choose_file(window_id(&ui)?, false)?;
+                    let folder = settings::backup_dialog_directory(&session.borrow().root)?;
+                    let selected = platform::choose_backup_path(
+                        window_id(&ui)?,
+                        &folder,
+                        BackupDialog::Restore,
+                    )?;
                     if let Some(source) = selected {
                         session.borrow_mut().restore_copy(&source)?;
                         ui.invoke_lock_vault();
@@ -2991,6 +3238,7 @@ pub fn run() -> Result<(), String> {
     {
         let weak = main.as_weak();
         let session = session.clone();
+        let main_state = main_state.clone();
         let popup_weak = popup.as_weak();
         let popup_state = popup_state.clone();
         let popup_timer = popup_timer.clone();
@@ -3011,13 +3259,21 @@ pub fn run() -> Result<(), String> {
                 );
             }
             let result = (|| {
-                if let Some(path) = platform::choose_file(window_id(&ui)?, true)? {
+                let folder = settings::backup_dialog_directory(&session.borrow().root)?;
+                if let Some(path) =
+                    platform::choose_backup_path(window_id(&ui)?, &folder, BackupDialog::Save)?
+                {
                     session
                         .borrow_mut()
                         .vault
                         .as_mut()
                         .ok_or("密码库已锁定。".to_string())?
                         .backup(&path)?;
+                    if ui.get_backups_open() {
+                        if let Err(error) = refresh_backups(&ui, &mut main_state.borrow_mut()) {
+                            return Err(format!("已保存加密备份，但未能刷新列表。{error}"));
+                        }
+                    }
                     success(&ui, format!("已保存加密备份：{}", path.display()));
                 }
                 Ok::<_, String>(())
@@ -3220,6 +3476,7 @@ pub fn run() -> Result<(), String> {
             let appearance = ui.get_appearance_choice();
             let protect_screen = ui.get_screen_protection_choice();
             let check_updates = ui.get_auto_update_choice();
+            let backup_directory = ui.get_backup_directory_choice();
             let was_auto_update = auto_update_pref.get();
             let result = (|| {
                 let shortcut = ui.get_shortcut_input().as_str().parse::<Shortcut>()?;
@@ -3244,6 +3501,7 @@ pub fn run() -> Result<(), String> {
                         protect_screen,
                     )?;
                     windows_password_manager::settings::save_auto_update(&root, check_updates)?;
+                    settings::save_backup_directory(&root, backup_directory.trim())?;
                     startup::save(&root, ui.get_start_at_logon(), ui.get_start_in_tray())
                 })();
                 if let Err(message) = write {
@@ -3350,8 +3608,12 @@ pub fn run() -> Result<(), String> {
                 main.set_status(message.into());
                 return;
             }
-            if main.get_editing() || main.get_verification_active() || main.get_blocked() {
-                main.set_status("请先完成主界面当前的编辑或验证，再操作账号。".into());
+            if main.get_editing()
+                || main.get_account_batch()
+                || main.get_verification_active()
+                || main.get_blocked()
+            {
+                main.set_status("请先完成主界面的操作，再从悬浮窗管理账号。".into());
                 return;
             }
             main.set_settings_open(false);
@@ -3657,7 +3919,7 @@ pub fn run() -> Result<(), String> {
                             && !signal.load(Ordering::SeqCst)
                             && !main_state.borrow().auth_cancel.load(Ordering::SeqCst);
                         if !current {
-                            if let Ok(Some((vault, path))) = result {
+                            if let Ok(BackupOutcome::Restored(vault, path)) = result {
                                 drop(vault);
                                 let _ = std::fs::remove_file(path);
                             }
@@ -3665,7 +3927,7 @@ pub fn run() -> Result<(), String> {
                             continue;
                         }
                         match result {
-                            Ok(Some((vault, path))) => {
+                            Ok(BackupOutcome::Restored(vault, path)) => {
                                 main.invoke_lock_vault();
                                 let previous = session.borrow().path.clone();
                                 session.borrow_mut().path = path;
@@ -3690,12 +3952,17 @@ pub fn run() -> Result<(), String> {
                                 } else {
                                     Ok(())
                                 };
-                                match refreshed.and(outcome) {
-                                    Ok(_) => success(
-                                        &main,
-                                        "已删除选中的备份，其他备份和当前密码库保留。".into(),
-                                    ),
+                                match outcome {
+                                    Ok(BackupOutcome::Deleted(count)) => match refreshed {
+                                        Ok(()) => {
+                                            success(&main, format!("已删除 {count} 份备份。"))
+                                        }
+                                        Err(e) => main.set_status(
+                                            format!("已删除 {count} 份备份。{e}").into(),
+                                        ),
+                                    },
                                     Err(e) => main.set_status(e.into()),
+                                    Ok(BackupOutcome::Restored(..)) => unreachable!(),
                                 }
                                 if main.get_backups_open() {
                                     main.invoke_focus_search();
@@ -3822,24 +4089,27 @@ pub fn run() -> Result<(), String> {
                                 } else {
                                     &popup_state
                                 };
-                                let index = state_index(owner_state, action.record());
-                                let Some(index) = index else {
-                                    owner_state.borrow_mut().grant = None;
-                                    ui.set_status("账号列表已变化，请重新选择。".into());
-                                    continue;
-                                };
-                                ui.set_selected(index as i32);
+                                if let Some(id) = action.record() {
+                                    let Some(index) = state_index(owner_state, id) else {
+                                        owner_state.borrow_mut().grant = None;
+                                        ui.set_status("账号列表已变化，请重新选择。".into());
+                                        continue;
+                                    };
+                                    ui.set_selected(index as i32);
+                                }
                                 match action {
                                     ProtectedAction::View(_) => ui.invoke_view_entry(),
                                     ProtectedAction::Edit(_) => ui.invoke_edit_entry(),
-                                    ProtectedAction::Delete(id) => {
-                                        if panel == 0 {
-                                            main_state.borrow_mut().deleting_id = id;
-                                        } else {
-                                            popup_state.borrow_mut().deleting_id = id;
+                                    ProtectedAction::Delete(request) => {
+                                        let unchanged = {
+                                            let state = owner_state.borrow();
+                                            state.delete_request == request
+                                                && !state.deleting_ids.is_empty()
+                                        };
+                                        if unchanged {
+                                            ui.set_delete_confirm(true);
+                                            ui.invoke_delete_entry();
                                         }
-                                        ui.set_delete_confirm(true);
-                                        ui.invoke_delete_entry();
                                     }
                                     ProtectedAction::Fill(_, mode) => ui.invoke_fill(match mode {
                                         FillMode::Password => FillAction::Password,

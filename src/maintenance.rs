@@ -1,6 +1,7 @@
 //! Managed local backups and a restartable, file-by-file master-password switch.
 use crate::vault::Vault;
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
@@ -10,7 +11,7 @@ use std::{
 type Result<T> = std::result::Result<T, String>;
 const STAGING: &str = "master-change";
 
-fn regular(path: &Path, directory: bool) -> Result<()> {
+pub(crate) fn regular(path: &Path, directory: bool) -> Result<()> {
     let meta = fs::symlink_metadata(path).map_err(|_| "无法读取本地文件信息。")?;
     #[cfg(windows)]
     {
@@ -128,6 +129,54 @@ pub fn backup_list(root: &Path, active: &Path) -> Result<Vec<BackupInfo>> {
             kind,
         });
     }
+    let mut seen: BTreeSet<_> = result
+        .iter()
+        .filter_map(|backup| fs::canonicalize(&backup.path).ok())
+        .collect();
+    if let Ok(active) = fs::canonicalize(active) {
+        seen.insert(active);
+    }
+    let default = root.join("backups");
+    let configured = crate::settings::backup_directory(root)?;
+    for directory in BTreeSet::from([default, configured]) {
+        if regular(&directory, true).is_err() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("db"))
+                || !entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !vault_name(&name.to_ascii_lowercase()))
+                || regular(&path, false).is_err()
+            {
+                continue;
+            }
+            let (Ok(canonical), Ok(meta)) = (fs::canonicalize(&path), entry.metadata()) else {
+                continue;
+            };
+            if !seen.insert(canonical) {
+                continue;
+            }
+            let nanos = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |age| age.as_nanos());
+            result.push(BackupInfo {
+                path,
+                nanos,
+                bytes: meta.len(),
+                kind: "目录文件",
+            });
+        }
+    }
     result.sort_by(|a, b| b.nanos.cmp(&a.nanos).then_with(|| a.path.cmp(&b.path)));
     Ok(result)
 }
@@ -178,25 +227,39 @@ pub fn inactive_vault_count(root: &Path, active: &Path) -> usize {
         .count()
 }
 
-fn managed_backup(root: &Path, active: &Path, source: &Path) -> Result<()> {
-    if !local_backups(root, active)?.iter().any(|p| p == source) {
-        return Err("备份已变化或不在本地备份清单中，请刷新列表。".into());
-    }
-    regular(source, false)
-}
-
-pub fn delete_backup(
+pub fn delete_backups(
     root: &Path,
     active: &Path,
-    source: &Path,
+    sources: &[PathBuf],
     master: &str,
     cancel: &AtomicBool,
-) -> Result<()> {
+) -> Result<usize> {
     canceled(cancel)?;
     Vault::verify_master(active, master)?;
-    managed_backup(root, active, source)?;
-    canceled(cancel)?;
-    fs::remove_file(source).map_err(|_| "无法删除选中的备份，请检查文件占用和权限。".into())
+    let files: BTreeSet<_> = backup_list(root, active)?
+        .into_iter()
+        .map(|backup| backup.path)
+        .collect();
+    if sources.is_empty()
+        || sources.iter().collect::<BTreeSet<_>>().len() != sources.len()
+        || sources.iter().any(|path| !files.contains(path))
+    {
+        return Err("所选备份已变化，请刷新列表后重新选择。".into());
+    }
+    let managed = local_backups(root, active)?;
+    for path in sources
+        .iter()
+        .filter(|path| managed.binary_search(path).is_err())
+    {
+        canceled(cancel)?;
+        Vault::verify_master(path, master).map_err(|_| {
+            format!(
+                "无法凭当前主密码验证「{}」为 Keyisle 备份。本批文件均未删除。",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })?;
+    }
+    remove_backups(root, sources, cancel)
 }
 
 pub fn restore_backup(
@@ -207,7 +270,13 @@ pub fn restore_backup(
     cancel: &AtomicBool,
 ) -> Result<(Vault, PathBuf)> {
     canceled(cancel)?;
-    managed_backup(root, active, source)?;
+    if !backup_list(root, active)?
+        .iter()
+        .any(|backup| backup.path == source)
+    {
+        return Err("备份已变化或不在备份列表中，请刷新后重试。".into());
+    }
+    regular(source, false)?;
     Vault::verify_master(source, master)?;
     canceled(cancel)?;
     let destination = crate::session::copy_backup(root, source)?;
@@ -478,22 +547,25 @@ pub fn clear_backups(
     if files.len() != expected {
         return Err("备份数量已变化，请重新确认清除范围。".into());
     }
-    let mut removed = 0;
-    for path in files {
+    remove_backups(root, &files, cancel)
+}
+
+fn remove_backups(root: &Path, files: &[PathBuf], cancel: &AtomicBool) -> Result<usize> {
+    for (removed, path) in files.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             return Err(format!(
                 "已停止清理，已删除 {removed} 个本地备份；当前密码库未删除。"
             ));
         }
-        regular(&path, false)?;
-        if fs::remove_file(path).is_err() {
+        let checked =
+            regular(root, true).and_then(|_| regular(path.parent().ok_or("备份路径无效。")?, true));
+        if checked.and_then(|_| regular(path, false)).is_err() || fs::remove_file(path).is_err() {
             return Err(format!(
-                "已删除 {removed} 个备份，其余未删除；请检查文件占用和权限。"
+                "已删除 {removed} 个备份，其余未删除。请刷新列表并检查文件是否被占用。"
             ));
         }
-        removed += 1;
     }
-    Ok(removed)
+    Ok(files.len())
 }
 
 #[cfg(test)]
@@ -645,8 +717,17 @@ mod tests {
         drop(vault);
         let cancel = AtomicBool::new(false);
         assert!(restore_backup(&profile.0, &active, &backups[0], "wrong", &cancel).is_err());
-        assert!(delete_backup(&profile.0, &active, &active, OLD, &cancel).is_err());
-        assert!(delete_backup(&profile.0, &active, &backups[0], "wrong", &cancel).is_err());
+        assert!(
+            delete_backups(
+                &profile.0,
+                &active,
+                std::slice::from_ref(&active),
+                OLD,
+                &cancel
+            )
+            .is_err()
+        );
+        assert!(delete_backups(&profile.0, &active, &backups[..1], "wrong", &cancel).is_err());
         let (restored, path) =
             restore_backup(&profile.0, &active, &backups[0], OLD, &cancel).unwrap();
         assert_ne!(path, active);
@@ -654,18 +735,124 @@ mod tests {
         assert_eq!(Vault::open(&active, OLD).unwrap().list().unwrap().len(), 2);
         drop(restored);
         assert!(
-            delete_backup(
+            delete_backups(
                 &profile.0,
                 &active,
-                &backups[0],
+                &backups[..1],
                 OLD,
                 &AtomicBool::new(true)
             )
             .is_err()
         );
-        delete_backup(&profile.0, &active, &backups[0], OLD, &cancel).unwrap();
+        delete_backups(&profile.0, &active, &backups[..1], OLD, &cancel).unwrap();
         assert!(backups[1].exists() && path.exists() && active.exists());
         assert_eq!(backup_list(&profile.0, &active).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn configured_directory_lists_exports_and_keeps_unverified_files() {
+        let profile = Profile::new();
+        let (active, backups) = profile.seed();
+        let custom = profile.0.join("exports");
+        fs::create_dir(&custom).unwrap();
+        let export = custom.join("my-existing-backup.DB");
+        let unrelated = custom.join("unrelated.db");
+        let elsewhere = profile.0.join("one-off-export.db");
+        fs::copy(&active, &export).unwrap();
+        fs::copy(&active, &elsewhere).unwrap();
+        fs::write(&unrelated, b"unrelated file").unwrap();
+
+        use crate::settings::{Snapshot, backup_dialog_directory, save_backup_directory};
+        assert_eq!(
+            backup_dialog_directory(&profile.0).unwrap(),
+            profile.0.join("backups")
+        );
+        assert!(save_backup_directory(&profile.0, "relative/path").is_err());
+        let snapshot = Snapshot::capture(&profile.0).unwrap();
+        save_backup_directory(&profile.0, custom.to_str().unwrap()).unwrap();
+        assert_eq!(backup_dialog_directory(&profile.0).unwrap(), custom);
+        let listed: BTreeSet<_> = backup_list(&profile.0, &active)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        assert_eq!(
+            listed,
+            BTreeSet::from([
+                backups[0].clone(),
+                backups[1].clone(),
+                export.clone(),
+                unrelated.clone()
+            ])
+        );
+
+        let cancel = AtomicBool::new(false);
+        assert!(
+            delete_backups(
+                &profile.0,
+                &active,
+                &[export.clone(), unrelated.clone()],
+                OLD,
+                &cancel
+            )
+            .is_err()
+        );
+        assert!(export.exists() && unrelated.exists());
+        let (restored, copy) = restore_backup(&profile.0, &active, &export, OLD, &cancel).unwrap();
+        drop(restored);
+        delete_backups(
+            &profile.0,
+            &active,
+            std::slice::from_ref(&export),
+            OLD,
+            &cancel,
+        )
+        .unwrap();
+        assert!(!export.exists() && unrelated.exists() && elsewhere.exists() && copy.exists());
+        fs::rename(&custom, profile.0.join("disconnected")).unwrap();
+        assert_eq!(backup_list(&profile.0, &active).unwrap().len(), 2);
+        assert_eq!(
+            backup_dialog_directory(&profile.0).unwrap(),
+            profile.0.join("backups")
+        );
+        assert_eq!(
+            crate::settings::backup_directory(&profile.0).unwrap(),
+            custom
+        );
+        snapshot.restore().unwrap();
+        assert_eq!(
+            crate::settings::backup_directory(&profile.0).unwrap(),
+            profile.0.join("backups")
+        );
+    }
+
+    #[test]
+    fn batch_delete_requires_exact_managed_selection_and_current_password() {
+        let profile = Profile::new();
+        let (active, backups) = profile.seed();
+        let untouched = profile.0.join("backups/auto-200-1.db");
+        let export = profile.0.join("manual-export.db");
+        fs::copy(&active, &untouched).unwrap();
+        fs::copy(&active, &export).unwrap();
+        let cancel = AtomicBool::new(false);
+        for invalid in [
+            active.clone(),
+            export.clone(),
+            profile.0.join("missing.db"),
+            backups[0].clone(),
+        ] {
+            let selection = [backups[0].clone(), invalid];
+            assert!(delete_backups(&profile.0, &active, &selection, OLD, &cancel).is_err());
+            assert!(backups[0].exists());
+        }
+        assert!(delete_backups(&profile.0, &active, &backups, "wrong", &cancel).is_err());
+        assert!(backups.iter().all(|path| path.exists()));
+        assert_eq!(
+            delete_backups(&profile.0, &active, &backups, OLD, &cancel).unwrap(),
+            2
+        );
+        assert!(backups.iter().all(|path| !path.exists()));
+        assert!(active.exists() && untouched.exists() && export.exists());
     }
 
     #[test]
@@ -767,6 +954,7 @@ const RESET_SETTINGS: &[&str] = &[
     "appearance.txt",
     "screen-protection.txt",
     "auto-update.txt",
+    "backup-directory.txt",
     "window.txt",
     "last-vault.txt",
     "shortcut.tmp",
@@ -776,6 +964,7 @@ const RESET_SETTINGS: &[&str] = &[
     "appearance.tmp",
     "screen-protection.tmp",
     "auto-update.tmp",
+    "backup-directory.tmp",
     "window.tmp",
     "last-vault.tmp",
     "settings-rollback-0.tmp",
@@ -785,6 +974,7 @@ const RESET_SETTINGS: &[&str] = &[
     "settings-rollback-4.tmp",
     "settings-rollback-5.tmp",
     "settings-rollback-6.tmp",
+    "settings-rollback-7.tmp",
 ];
 
 fn reset_owned(relative: &Path) -> bool {

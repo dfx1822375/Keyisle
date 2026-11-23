@@ -55,9 +55,9 @@ Store categories, tags, URLs, and notes alongside each account, with a built-in 
 
 Mark an entry as sensitive to require verification before viewing, editing, deleting, or filling it. Windows account password verification is the default; `Tab` switches to PIN / Windows Hello or the vault master password. Each approval is limited to the current action. Windows account passwords are collected by the system credentials dialog and are not stored in the vault.
 
-| Account editor | Sensitive-entry verification |
-| --- | --- |
-| ![Account editor with masked password, categories, tags, URL, and notes](docs/screenshots/account-editor.png) | ![Sensitive-entry prompt offering Windows password, PIN or Hello, and vault master password](docs/screenshots/verification.png) |
+![Account editor with masked password, categories, tags, URL, and notes](docs/screenshots/account-editor.png)
+
+![Sensitive-entry prompt offering Windows password, PIN or Hello, and vault master password](docs/screenshots/verification.png)
 
 ## Appearance, locking, and backups
 
@@ -65,11 +65,13 @@ Choose system, light, or dark appearance with teal, blue, violet, or graphite ac
 
 The default lock timeout is 5 minutes of computer inactivity. Both the timeout and idle basis are configurable. Windows session lock, sleep, and disconnection lock the vault and cancel pending consent or filling. Manual launch opens the main window; automatic startup can remain in the tray.
 
-| Settings | Encrypted backup manager |
-| --- | --- |
-| ![Settings for appearance, color, shortcut recording, and automatic locking](docs/screenshots/settings.png) | ![Backup manager with encrypted backup, restore, and deletion actions](docs/screenshots/backup-manager.png) |
+![Settings for appearance, color, shortcut recording, and automatic locking](docs/screenshots/settings.png)
 
-Keyisle creates encrypted backups before account edits or deletions. You can also export a backup or restore into a separate working copy. Changing the master password updates software-managed local backups; external exports keep their previous password.
+![Backup manager with multiple backups selected for deletion](docs/screenshots/backup-manager.png)
+
+Keyisle creates encrypted backups before editing existing accounts. Deleting accounts, individually or in a batch, creates no new backup. Choose Batch select in the account list to select and delete multiple accounts. A batch containing a sensitive entry requires one verification.
+
+Set a default backup folder in Settings. Export and restore dialogs open there, and you can browse elsewhere for any individual operation. Backup management lists software-managed backups and database files in the selected folder. You can select multiple backups and confirm deletion with the current vault master password. Restore creates a separate working copy. Changing the master password updates software-managed backups. Manual exports keep their previous password.
 
 Reset requires the current vault master password and confirmation. It removes software-managed vaults, backups, preferences, and startup registration. External exports and unknown files are retained. File deletion is not secure erasure. See [storage and backup behavior](docs/storage.md).
 
