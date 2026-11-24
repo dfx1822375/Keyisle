@@ -393,11 +393,19 @@ impl Target {
         }
     }
 
-    pub fn location_description(&self) -> String {
+    pub fn location_source(&self) -> &'static str {
         match self.location {
-            Some((x, y, true)) => format!("输入光标位置 ({x}, {y}) · 原输入框"),
-            Some((x, y, false)) => format!("呼出时鼠标 ({x}, {y}) · 已记录原输入窗口"),
-            None => "已记录原输入窗口；当前位置不可读取".into(),
+            Some((_, _, true)) => "原输入框",
+            Some((_, _, false)) => "原窗口 · 鼠标位置",
+            None => "原窗口 · 无光标位置",
+        }
+    }
+
+    pub fn location_details(&self) -> (&'static str, String, &'static str) {
+        match self.location {
+            Some((x, y, true)) => ("输入光标位置 ", format!("({x}, {y})"), " · 原输入框"),
+            Some((x, y, false)) => ("呼出时鼠标 ", format!("({x}, {y})"), " · 已记录原输入窗口"),
+            None => ("已记录原输入窗口；当前位置不可读取", String::new(), ""),
         }
     }
 

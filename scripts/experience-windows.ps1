@@ -30,6 +30,7 @@ trap {Write-Output $_.Exception.Message;Write-Output $_.ScriptStackTrace;try{Cap
 try{
  StartApp;Capture '01-create.png';SetEdit 0 'GUI-Master-Only!2026';SetEdit 1 'GUI-Master-Only!2026';Button '创建密码库';Pause 1500
  foreach($item in @(@('企业邮箱','mail.user'),@('aTrust 测试','vpn.user'))){Button '新增账号';SetEdit 0 $item[0];SetEdit 1 $item[1];SetEdit 2 'Example-Only!2026';Button '保存账号'}
+ Button '新增账号';SetEdit 0 '空用户名回归';SetEdit 2 'Example-Only!2026';Button '保存账号'
  $h=[IntPtr](Main).Current.NativeWindowHandle;$s=[ExperienceNative]::GetDpiForWindow($h)/96.0
  [ExperienceNative]::SetWindowPos($h,[IntPtr]::Zero,120,90,[int](840*$s),[int](610*$s),4)|Out-Null;Pause 800
  $before=(Main).Current.BoundingRectangle;Assert (Test-Path (Join-Path $DataDir 'window.txt')) 'Layout not saved'
@@ -58,8 +59,24 @@ try{
  Assert ((Red (Canvas $pop)) -lt 80) 'Popup did not receive dark mode'
  $texts=@(Visible $pop ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Text)|ForEach-Object{$_.Current.Name})
  Assert (@($texts|Where-Object{$_ -like '*powershell*目标页面*Local account input*'}).Count -gt 0) 'Popup omitted application/window-page title'
- Assert (@($texts|Where-Object{$_ -match '(输入光标位置|呼出时鼠标) \(-?\d+, -?\d+\)'}).Count -gt 0) 'Popup omitted honest input/callout coordinates'
+ Assert (@($texts|Where-Object{$_ -match '^原输入框$|^原窗口 · 鼠标位置$'}).Count -gt 0) 'Popup omitted the input location source'
+ $location=@(Visible $pop ([Windows.Automation.AutomationElement]::NameProperty) '位置详情')[0]
+ Assert ($null -ne $location) 'Popup omitted the location detail action'
+ $location.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();Pause 250
+ $texts=@(Visible (Popup) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Text)|ForEach-Object{$_.Current.Name})
+ Assert (@($texts|Where-Object{$_ -match '(输入光标位置|呼出时鼠标) \(-?\d+, -?\d+\)'}).Count -gt 0) 'Location detail omitted captured input/callout coordinates'
  $edit=@(Visible $pop ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit))[0];$edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('youxiang');$edit.SetFocus();Pause 250;Capture '06-popup-dark-target.png' (Popup)
+ $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('空用户名回归');$edit.SetFocus();Pause 250
+ $popupBefore=(Popup).Current.BoundingRectangle
+ SendTestKeys '^{ENTER}';Pause 650
+ $pop=Popup
+ $errorText=@(Visible $pop ([Windows.Automation.AutomationElement]::NameProperty) '字段为空或包含控制字符，已取消填充。 可选择其他账号或填充方式后重试。')[0]
+ Assert ($null -ne $errorText) 'Popup did not show the failed fill feedback'
+ $popupAfter=$pop.Current.BoundingRectangle
+ Assert ($popupAfter.Height -eq $popupBefore.Height) 'Status changed the popup height'
+ Assert ($errorText.Current.BoundingRectangle.Bottom -le $popupAfter.Bottom) 'Popup feedback is clipped'
+ Capture '09-popup-status.png' $pop
+ Write-Output 'PASS: fill error stays inside the compact popup without changing its height.'
  [Windows.Forms.SendKeys]::SendWait('^+m');Pause 700;Assert ($receiverEdit.Text -eq '') 'Management shortcut filled receiver'
  StopApp;StartApp;Assert ((Red (Canvas)) -lt 80) 'Dark theme did not survive cold startup';Capture '07-unlock-dark.png';Unlock
  Button '设置';Combo '外观模式' 0;Button '保存设置';$appsLight=1;try{$appsLight=(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme}catch{}

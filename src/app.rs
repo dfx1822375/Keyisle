@@ -1,10 +1,10 @@
 use crate::platform::{self, BackupDialog, Event, Native, Target};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeSet, HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -17,7 +17,7 @@ use std::{
 use windows_password_manager::{
     FillMode, InputUnit, fill_plan, maintenance,
     security::{
-        Grant, IdleSource, LOCK_MINUTES, LockClock, LockSettings, ProtectedAction,
+        self, Grant, IdleSource, LOCK_MINUTES, LockClock, LockSettings, ProtectedAction,
         generate_password,
     },
     session::Session,
@@ -97,6 +97,7 @@ fn window_id(ui: &AppWindow) -> Result<usize, String> {
 }
 
 fn reset_secret_masks(ui: &AppWindow) {
+    ui.set_details_password("".into());
     ui.set_secret_serial(ui.get_secret_serial().wrapping_add(1));
 }
 
@@ -119,7 +120,7 @@ fn clear_details(ui: &AppWindow) {
     ui.set_details_open(false);
     ui.set_details_title("".into());
     ui.set_details_user("".into());
-    ui.set_details_password("".into());
+    ui.set_details_has_password(false);
     ui.set_details_category("".into());
     ui.set_details_tags("".into());
     ui.set_details_url("".into());
@@ -174,7 +175,8 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
     let rows: Vec<_> = backups
         .iter()
         .map(|entry| BackupRow {
-            title: format!("{} · {}", entry.kind, platform::backup_time(entry.nanos)).into(),
+            title: entry.kind.into(),
+            date: platform::backup_time(entry.nanos).into(),
             detail: format!(
                 "{:.1} KiB · {}",
                 entry.bytes as f64 / 1024.0,
@@ -203,36 +205,30 @@ fn refresh_backups(ui: &AppWindow, state: &mut State) -> Result<(), String> {
     Ok(())
 }
 
-fn rich_markup(color: &str, query: &str, text: &str) -> Option<String> {
-    if query.trim().is_empty() || text.is_empty() {
-        return None;
-    }
-    let spans = windows_password_manager::search::highlights(query, text);
+fn rich(color: &str, text: &str, spans: &[(&str, bool)]) -> slint::StyledText {
     if !spans.iter().any(|(_, hit)| *hit) {
-        return None;
+        return slint::StyledText::from_plain_text(text);
     }
-    Some(
-        spans
-            .into_iter()
-            .map(|(part, hit)| {
-                let escaped = windows_password_manager::search::highlighted_markdown("", &part);
-                if hit {
-                    format!("<font color=\"{color}\">**{escaped}**</font>")
-                } else {
-                    escaped
-                }
-            })
-            .collect(),
-    )
+    let markup: String = spans
+        .iter()
+        .map(|(part, hit)| {
+            let escaped = windows_password_manager::search::highlighted_markdown("", part);
+            if *hit {
+                format!("<font color=\"{color}\">**{escaped}**</font>")
+            } else {
+                escaped
+            }
+        })
+        .collect();
+    slint::StyledText::from_markdown(&markup)
+        .unwrap_or_else(|_| slint::StyledText::from_plain_text(text))
 }
 
-fn rich(ui: &AppWindow, query: &str, text: &str) -> slint::StyledText {
-    let color = ui.get_match_color();
-    match rich_markup(color.as_str(), query, text) {
-        Some(markup) => slint::StyledText::from_markdown(&markup)
-            .unwrap_or_else(|_| slint::StyledText::from_plain_text(text)),
-        None => slint::StyledText::from_plain_text(text),
+fn highlighter(tokens: &[String], text: &str) -> Vec<(String, bool)> {
+    if text.is_empty() {
+        return Vec::new();
     }
+    windows_password_manager::search::highlights_for_tokens(tokens, text)
 }
 
 fn success(ui: &AppWindow, message: String) {
@@ -253,6 +249,25 @@ fn success(ui: &AppWindow, message: String) {
     });
 }
 
+fn changed_options(
+    current: &ModelRc<slint::SharedString>,
+    placeholder: &str,
+    options: &[String],
+) -> Option<ModelRc<slint::SharedString>> {
+    let values = || std::iter::once(placeholder).chain(options.iter().map(String::as_str));
+    if current.row_count() == options.len() + 1
+        && current
+            .iter()
+            .zip(values())
+            .all(|(old, new)| old.as_str() == new)
+    {
+        return None;
+    }
+    Some(ModelRc::new(VecModel::from(
+        values().map(Into::into).collect::<Vec<_>>(),
+    )))
+}
+
 fn refresh(ui: &AppWindow, state: &mut State) {
     let previously_selected = selected_id(ui, state);
     let mut session = state.session.borrow_mut();
@@ -260,7 +275,7 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     let settings = state.clock.settings();
     ui.set_policy_label(
         format!(
-            "{}空闲 {} 分钟自动锁定 · 不自动提交登录",
+            "{}空闲 {} 分钟锁定",
             if settings.source == IdleSource::Computer {
                 "电脑"
             } else {
@@ -290,6 +305,8 @@ fn refresh(ui: &AppWindow, state: &mut State) {
         })
         .unwrap_or_default();
 
+    let query = ui.get_query();
+    let tokens = windows_password_manager::search::query_tokens(query.as_str());
     let (categories, tags, mut ranked) = if let Some(cache) = session.cache.as_ref() {
         if !cache
             .categories
@@ -301,7 +318,6 @@ fn refresh(ui: &AppWindow, state: &mut State) {
         if !cache.tags.iter().any(|t| t == ui.get_tag().as_str()) {
             ui.set_tag("".into());
         }
-        let query_str = ui.get_query();
         let cat_str = ui.get_category();
         let tag_str = ui.get_tag();
         let ranked: Vec<_> = cache
@@ -309,9 +325,9 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             .iter()
             .filter_map(|(record, prepared)| {
                 prepared
-                    .rank(
+                    .rank_tokens(
                         record,
-                        query_str.as_str(),
+                        tokens.as_deref()?,
                         cat_str.as_str(),
                         tag_str.as_str(),
                     )
@@ -354,10 +370,18 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             .then(a.id.cmp(&b.id))
     });
 
-    let query = ui.get_query();
-    let has_query = !query.trim().is_empty();
     let color = ui.get_match_color();
+    let tokens = tokens.as_deref().unwrap_or_default();
+    let compact = ui.get_compact();
     let mut rows = Vec::with_capacity(ranked.len());
+    let mut shared_metadata = HashMap::new();
+    let mut metadata_spans = |value: String| {
+        Rc::clone(
+            shared_metadata
+                .entry(value.clone())
+                .or_insert_with(|| Rc::new(highlighter(tokens, &value))),
+        )
+    };
     for (_, record) in ranked {
         state.matches.push(record.id);
         let accessible_title = if record.sensitive {
@@ -368,72 +392,66 @@ fn refresh(ui: &AppWindow, state: &mut State) {
         let username = if record.sensitive {
             "使用前需验证".to_string()
         } else {
-            record.username.clone()
+            record.username
         };
-        let matched = |value: &str| {
-            has_query
-                && !value.is_empty()
-                && windows_password_manager::search::highlights(query.as_str(), value)
+        let username_spans = highlighter(if record.sensitive { &[] } else { tokens }, &username);
+        let category = metadata_spans(record.category);
+        let tags = metadata_spans(record.tags);
+        let url = metadata_spans(record.url);
+        let mut metadata = Vec::new();
+        if compact {
+            metadata.extend(
+                username_spans
                     .iter()
-                    .any(|(_, hit)| *hit)
-        };
-        let cat_hit = matched(&record.category);
-        let tag_hit = matched(&record.tags);
-        let url_hit = matched(&record.url);
-
-        let mut detail = [&record.category, &record.tags]
-            .into_iter()
-            .filter(|value| !value.is_empty())
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(" · ");
-        if url_hit {
-            if !detail.is_empty() {
-                detail.push_str(" · ");
-            }
-            detail.push_str(&format!("网址：{}", record.url));
+                    .map(|(part, hit)| (part.as_str(), *hit)),
+            );
         }
-        let source = [
-            ("分类", &record.category, cat_hit),
-            ("标签", &record.tags, tag_hit),
-            ("网址", &record.url, url_hit),
-        ]
-        .into_iter()
-        .filter(|(_, _, hit)| *hit)
-        .map(|(label, value, _)| format!("{label}：{value}"))
-        .collect::<Vec<_>>()
-        .join(" · ");
-        let hint = if source.is_empty() {
-            username.clone()
-        } else {
-            format!("{username} · {source}")
-        };
-        let hint_rich = if record.sensitive {
-            if source.is_empty() {
-                slint::StyledText::from_plain_text(&username)
-            } else {
-                let source_md = rich_markup(color.as_str(), query.as_str(), &source)
-                    .unwrap_or_else(|| {
-                        windows_password_manager::search::highlighted_markdown("", &source)
-                    });
-                let prefix = windows_password_manager::search::highlighted_markdown(
-                    "",
-                    &format!("{username} · "),
-                );
-                slint::StyledText::from_markdown(&format!("{prefix}{source_md}"))
-                    .unwrap_or_else(|_| slint::StyledText::from_plain_text(&hint))
+        for (label, field) in [("分类：", &category), ("标签：", &tags), ("网址：", &url)]
+        {
+            let matched = field.iter().any(|(_, hit)| *hit);
+            if field.is_empty() || (!matched && (compact || label == "网址：")) {
+                continue;
             }
+            if !metadata.is_empty() {
+                metadata.push((" · ", false));
+            }
+            if compact || label == "网址：" {
+                metadata.push((label, false));
+            }
+            metadata.extend(field.iter().map(|(part, hit)| (part.as_str(), *hit)));
+        }
+        let meta_text: String = metadata.iter().map(|(part, _)| *part).collect();
+        let meta_rich = rich(color.as_str(), &meta_text, &metadata);
+        let (hint, hint_rich, detail, detail_rich, user_rich) = if compact {
+            (
+                meta_text,
+                meta_rich,
+                String::new(),
+                slint::StyledText::default(),
+                slint::StyledText::default(),
+            )
         } else {
-            rich(ui, query.as_str(), &hint)
+            let user = username_spans
+                .iter()
+                .map(|(part, hit)| (part.as_str(), *hit))
+                .collect::<Vec<_>>();
+            (
+                String::new(),
+                slint::StyledText::default(),
+                meta_text,
+                meta_rich,
+                rich(color.as_str(), &username, &user),
+            )
         };
+        let title = highlighter(tokens, &record.title);
+        let title_spans = title
+            .iter()
+            .map(|(part, hit)| (part.as_str(), *hit))
+            .collect::<Vec<_>>();
         rows.push(EntryRow {
-            title_rich: rich(ui, query.as_str(), &record.title),
-            user_rich: if record.sensitive {
-                slint::StyledText::from_plain_text(&username)
-            } else {
-                rich(ui, query.as_str(), &username)
-            },
-            detail_rich: rich(ui, query.as_str(), &detail),
+            title_rich: rich(color.as_str(), &record.title, &title_spans),
+            user_rich,
+            detail_rich,
             hint_rich,
             hint: hint.into(),
             title: accessible_title.into(),
@@ -443,16 +461,22 @@ fn refresh(ui: &AppWindow, state: &mut State) {
             checked: state.account_checks.contains(&record.id),
         });
     }
-    ui.set_categories(ModelRc::new(VecModel::from(
-        std::iter::once("全部分类".into())
-            .chain(categories.iter().map(|value| value.as_str().into()))
-            .collect::<Vec<_>>(),
-    )));
-    ui.set_tags(ModelRc::new(VecModel::from(
-        std::iter::once("全部标签".into())
-            .chain(tags.iter().map(|value| value.as_str().into()))
-            .collect::<Vec<_>>(),
-    )));
+    if !compact {
+        if let Some(model) = changed_options(&ui.get_edit_categories(), "选择已有分类", &categories)
+        {
+            ui.set_edit_categories(model);
+        }
+        if let Some(model) = changed_options(&ui.get_edit_tag_options(), "添加已有标签", &tags)
+        {
+            ui.set_edit_tag_options(model);
+        }
+        if let Some(model) = changed_options(&ui.get_categories(), "全部分类", &categories) {
+            ui.set_categories(model);
+        }
+        if let Some(model) = changed_options(&ui.get_tags(), "全部标签", &tags) {
+            ui.set_tags(model);
+        }
+    }
     ui.set_category_index(
         categories
             .iter()
@@ -484,6 +508,19 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     }
 }
 
+fn master_attempt_result<T>(session: &mut Session, result: Result<T, String>) -> Result<T, String> {
+    match &result {
+        Ok(_) => session.master_attempts.accepted(),
+        Err(message) if message == windows_password_manager::vault::MASTER_REJECTED => {
+            if let Some(wait) = session.master_attempts.rejected(Instant::now()) {
+                return Err(format!("{message} {wait}"));
+            }
+        }
+        Err(_) => {}
+    }
+    result
+}
+
 fn selected_id(ui: &AppWindow, state: &State) -> Option<i64> {
     usize::try_from(ui.get_selected())
         .ok()
@@ -502,6 +539,7 @@ enum JobResult {
         panel: usize,
         serial: u64,
         generation: u64,
+        master_password: bool,
         result: Result<(), String>,
     },
     UpdateCheck {
@@ -674,8 +712,15 @@ fn authorize(ui: &AppWindow, state: &mut State, action: ProtectedAction) -> bool
     false
 }
 
-fn guard_editor(ui: &AppWindow, action: i32) -> bool {
-    if ui.get_editing() && ui.get_edit_dirty() && ui.get_unlocked() {
+fn guard_draft(ui: &AppWindow, action: i32) -> bool {
+    let settings_route =
+        ui.get_settings_open() || (ui.get_about_open() && ui.get_about_from_settings());
+    if settings_route {
+        ui.invoke_cancel_recording();
+    }
+    let settings_draft = settings_route && ui.get_settings_dirty();
+    if ui.get_unlocked() && ((ui.get_editing() && ui.get_edit_dirty()) || settings_draft) {
+        ui.set_discard_settings(settings_draft);
         ui.set_discard_action(action);
         ui.invoke_focus_discard();
         true
@@ -728,7 +773,7 @@ fn cancel(ui: &AppWindow, state: &mut State, timer: &Timer, popup_watch: Option<
     ui.set_busy(false);
     ui.set_can_fill(false);
     ui.set_target_label("".into());
-    ui.set_target_detail("".into());
+    ui.set_target_detail(TargetDetail::default());
     ui.set_master("".into());
     ui.set_confirmation("".into());
     clear_editor(ui);
@@ -742,7 +787,7 @@ fn report(ui: &AppWindow, state: &mut State, message: String, popup_watch: Optio
     ui.set_can_fill(false);
     ui.set_status(message.into());
     ui.set_target_label("本次填充已取消；请重新点击输入框并按呼出快捷键。".into());
-    ui.set_target_detail("".into());
+    ui.set_target_detail(TargetDetail::default());
     let _ = show_window(ui, popup_watch);
     if let Ok(window) = window_id(ui) {
         platform::activate(window);
@@ -795,6 +840,7 @@ fn bind(
         context_record: None,
     }));
     let timer = Rc::new(Timer::default());
+    ui.on_master_strength_hint(|password| security::master_strength_hint(password.as_str()).into());
     {
         let weak = ui.as_weak();
         ui.on_open_slint_site(move || {
@@ -824,6 +870,7 @@ fn bind(
                     return;
                 }
                 state.borrow().clock.touch();
+                ui.invoke_cancel_recording();
                 clear_details(&ui);
                 state.borrow_mut().details_id = None;
                 ui.set_about_from_settings(ui.get_settings_open());
@@ -898,7 +945,7 @@ fn bind(
                     ui.invoke_close_reset();
                     return;
                 }
-                if guard_editor(&ui, 2) {
+                if guard_draft(&ui, 2) {
                     return;
                 }
                 cancel(&ui, &mut state.borrow_mut(), &timer, watch.as_deref());
@@ -937,7 +984,7 @@ fn bind(
                     surface_blocked_window(&ui);
                     return;
                 }
-                if guard_editor(&ui, 3) {
+                if guard_draft(&ui, 3) {
                     surface_blocked_window(&ui);
                     return;
                 }
@@ -963,8 +1010,14 @@ fn bind(
                 ui.invoke_focus_search();
                 return;
             }
-            clear_editor(&ui);
-            state.borrow_mut().editor_verified = None;
+            if ui.get_discard_settings() {
+                ui.invoke_mark_settings_saved();
+                ui.set_settings_open(false);
+                ui.set_about_from_settings(false);
+            } else {
+                clear_editor(&ui);
+                state.borrow_mut().editor_verified = None;
+            }
             match action {
                 2 => {
                     cancel(&ui, &mut state.borrow_mut(), &timer, watch.as_deref());
@@ -996,8 +1049,14 @@ fn bind(
             if session.working || session.vault.is_some() {
                 return;
             }
-            let master = Zeroizing::new(ui.get_master().to_string());
             let creating = !session.path.exists();
+            if !creating
+                && let Some(message) = session.master_attempts.retry_message(Instant::now())
+            {
+                ui.set_status(message.into());
+                return;
+            }
+            let master = Zeroizing::new(ui.get_master().to_string());
             let confirmation = Zeroizing::new(ui.get_confirmation().to_string());
             ui.set_master("".into());
             ui.set_confirmation("".into());
@@ -1046,7 +1105,7 @@ fn bind(
             if !available(&state.borrow()) {
                 return;
             }
-            if guard_editor(&ui, 1) {
+            if guard_draft(&ui, 1) {
                 return;
             }
             clear_editor(&ui);
@@ -1070,7 +1129,12 @@ fn bind(
                 return;
             }
             state.borrow().clock.touch();
-            match generate_password(20, true) {
+            let length = match ui.get_generator_length_choice() {
+                0 => 12,
+                1 => 16,
+                _ => 20,
+            };
+            match generate_password(length, ui.get_generator_symbols()) {
                 Ok(generated) => {
                     ui.set_edit_password(generated.as_str().into());
                     ui.set_edit_dirty(true);
@@ -1106,15 +1170,15 @@ fn bind(
                 .vault
                 .as_ref()
                 .ok_or("密码库已锁定。".to_string())
-                .and_then(|v| v.get(id));
+                .and_then(|v| v.details(id));
             match record {
-                Ok(record) => {
+                Ok((record, has_password)) => {
                     clear_details(&ui);
                     state.details_id = Some(id);
                     state.clock.touch();
                     ui.set_details_title(record.title.into());
                     ui.set_details_user(record.username.into());
-                    ui.set_details_password(record.password.as_str().into());
+                    ui.set_details_has_password(has_password);
                     ui.set_details_category(record.category.into());
                     ui.set_details_tags(record.tags.into());
                     ui.set_details_url(record.url.into());
@@ -1125,6 +1189,54 @@ fn bind(
                     ui.invoke_focus_search();
                 }
                 Err(message) => ui.set_status(message.into()),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let clock = clock.clone();
+        ui.on_append_edit_tag(move |tag| {
+            let Some(ui) = weak.upgrade() else { return };
+            if !ui.get_editing() || ui.get_ui_blocked() {
+                return;
+            }
+            let raw = ui.get_edit_tags();
+            let value = raw.trim();
+            if value
+                .split([',', '，', ';', '；'])
+                .map(str::trim)
+                .any(|part| part == tag.as_str())
+            {
+                return;
+            }
+            ui.set_edit_tags(if value.is_empty() {
+                tag
+            } else {
+                format!("{value}, {tag}").into()
+            });
+            ui.set_edit_dirty(true);
+            clock.touch();
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_reveal_details_password(move |reveal| {
+            let Some(ui) = weak.upgrade() else { return };
+            if !reveal {
+                ui.set_details_password("".into());
+                return;
+            }
+            let state = state.borrow();
+            if !ui.get_details_open() || !available(&state) {
+                return;
+            }
+            if let Some(id) = state.details_id {
+                state.clock.touch();
+                match state.session.borrow().vault.as_ref().unwrap().password(id) {
+                    Ok(password) => ui.set_details_password(password.as_str().into()),
+                    Err(error) => ui.set_status(error.into()),
+                }
             }
         });
     }
@@ -1143,14 +1255,22 @@ fn bind(
             {
                 return;
             }
-            state.borrow().clock.touch();
-            let value = Zeroizing::new(if copy_secret {
-                ui.get_details_password().to_string()
+            let state = state.borrow();
+            state.clock.touch();
+            let value = if copy_secret {
+                state
+                    .session
+                    .borrow()
+                    .vault
+                    .as_ref()
+                    .unwrap()
+                    .password(state.details_id.unwrap())
             } else {
-                ui.get_details_user().to_string()
+                Ok(Zeroizing::new(ui.get_details_user().to_string()))
+            };
+            let result = value.and_then(|value| {
+                window_id(&ui).and_then(|owner| platform::copy_protected_text(owner, &value))
             });
-            let result =
-                window_id(&ui).and_then(|owner| platform::copy_protected_text(owner, &value));
             match result {
                 Ok(seq) => {
                     seq_cell.set(seq);
@@ -1256,7 +1376,7 @@ fn bind(
         let state = state.clone();
         ui.on_cancel_edit(move || {
             if let Some(ui) = weak.upgrade() {
-                if guard_editor(&ui, 1) {
+                if guard_draft(&ui, 1) {
                     return;
                 }
                 clear_editor(&ui);
@@ -1490,6 +1610,16 @@ fn bind(
                     return;
                 }
             };
+            if method == 0
+                && let Some(message) = state
+                    .session
+                    .borrow()
+                    .master_attempts
+                    .retry_message(Instant::now())
+            {
+                ui.set_status(message.into());
+                return;
+            }
             let master = Zeroizing::new(ui.get_verify_master().to_string());
             ui.set_verify_master("".into());
             reset_secret_masks(&ui);
@@ -1532,6 +1662,7 @@ fn bind(
                     panel,
                     serial,
                     generation,
+                    master_password: method == 0,
                     result,
                 });
             };
@@ -1551,6 +1682,21 @@ fn bind(
             1 => ui.on_verify_hello(handler),
             _ => ui.on_verify_windows(handler),
         }
+    }
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        ui.on_close_settings(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_cancel_recording();
+                if !guard_draft(&ui, 5) {
+                    ui.set_settings_open(false);
+                    ui.set_status("".into());
+                    ui.invoke_focus_search();
+                }
+                state.borrow().clock.touch();
+            }
+        });
     }
     {
         let weak = ui.as_weak();
@@ -1619,7 +1765,9 @@ fn bind(
             ui.set_appearance_choice(ui.get_appearance_mode());
             ui.set_screen_protection_choice(screen_protection);
             ui.set_auto_update_choice(auto_update);
+            ui.invoke_mark_settings_saved();
             ui.set_settings_open(true);
+            ui.invoke_scroll_settings_top();
             ui.set_status("".into());
             state.borrow().clock.touch();
         });
@@ -1634,6 +1782,7 @@ fn bind(
             if !available(&state.borrow()) || !ui.get_settings_open() {
                 return;
             }
+            ui.invoke_cancel_recording();
             let root = state.borrow().session.borrow().root.clone();
             let draft = PathBuf::from(ui.get_backup_directory_choice().as_str());
             let result = (|| {
@@ -1670,6 +1819,7 @@ fn bind(
             if !available(&state.borrow()) {
                 return;
             }
+            ui.invoke_cancel_recording();
             clear_maintenance(&ui);
             match refresh_backups(&ui, &mut state.borrow_mut()) {
                 Ok(()) => {
@@ -1868,6 +2018,7 @@ fn bind(
             if !available(&state.borrow()) {
                 return;
             }
+            ui.invoke_cancel_recording();
             let state = state.borrow();
             let session = state.session.borrow();
             match maintenance::local_backups(&session.root, &session.path) {
@@ -2270,11 +2421,10 @@ fn bind(
                 return false;
             }
             let relative = y - top - ui.get_list_scroll();
-            let index = (relative / 64.0).floor() as usize;
+            let stride = ui.get_row_stride();
+            let index = (relative / stride).floor() as usize;
             let mut state = state.borrow_mut();
-            let record = if relative >= 0.0
-                && relative % 64.0 < if ui.get_compact() { 56.0 } else { 60.0 }
-            {
+            let record = if relative >= 0.0 && relative % stride < ui.get_row_height() {
                 state.matches.get(index).copied()
             } else {
                 None
@@ -2387,6 +2537,9 @@ fn show_panel(
         .and_then(|target| target.application_key())
         .unwrap_or_default();
     if !ui.get_compact() {
+        if ui.get_about_open() && ui.get_about_from_settings() && ui.get_unlocked() {
+            ui.set_settings_open(true);
+        }
         ui.set_about_open(false);
         clear_details(ui);
         state.details_id = None;
@@ -2399,12 +2552,18 @@ fn show_panel(
             .unwrap_or_else(|| format!("先点击外部输入框，再按 {}。", ui.get_shortcut_label()))
             .into(),
     );
-    ui.set_target_detail(
+    ui.set_target_location(
         target
-            .map(|t| t.location_description())
+            .map(|t| t.location_source())
             .unwrap_or_default()
             .into(),
     );
+    let (prefix, coordinates, suffix) = target.map(|t| t.location_details()).unwrap_or_default();
+    ui.set_target_detail(TargetDetail {
+        prefix: prefix.into(),
+        coordinates: coordinates.into(),
+        suffix: suffix.into(),
+    });
     ui.set_status("".into());
     if !reopening {
         ui.set_query("".into());
@@ -2921,6 +3080,16 @@ pub fn run() -> Result<(), String> {
                             platform::fit_window_to_work_area(id);
                         }
                     }
+                    if !ui.get_compact()
+                        && !ui.get_fixed_page()
+                        && let Some(size) = window.with_winit_window(|native| {
+                            native.inner_size().to_logical::<f32>(native.scale_factor())
+                        })
+                        && size.width >= ui.get_desktop_min_width()
+                        && size.height >= ui.get_desktop_min_height()
+                    {
+                        ui.set_list_width_basis(size.width);
+                    }
                     if !ui.get_fixed_page()
                         && !layout_paused.get()
                         && layout_mode.get() == Some(false)
@@ -3049,7 +3218,7 @@ pub fn run() -> Result<(), String> {
                     state.target = None;
                     popup.set_can_fill(false);
                     popup.set_target_label("目标已失效，请重新点击输入框并按呼出快捷键。".into());
-                    popup.set_target_detail("".into());
+                    popup.set_target_detail(TargetDetail::default());
                     popup.set_status(error.into());
                 }
             }
@@ -3167,7 +3336,7 @@ pub fn run() -> Result<(), String> {
                         ui.set_busy(false);
                         ui.set_can_fill(false);
                         ui.set_target_label("".into());
-                        ui.set_target_detail("".into());
+                        ui.set_target_detail(TargetDetail::default());
                         ui.set_status("密码库已锁定。".into());
                         clear_editor(&ui);
                         clear_details(&ui);
@@ -3363,7 +3532,7 @@ pub fn run() -> Result<(), String> {
         let capture_epoch = recording_generation.clone();
         ui.on_start_recording(move || {
             if let Some(ui) = weak.upgrade() {
-                if ui.get_blocked() || !ui.get_settings_open() {
+                if ui.get_ui_blocked() || ui.get_discard_open() || !ui.get_settings_visible() {
                     return;
                 }
                 let owner = match window_id(&ui) {
@@ -3551,10 +3720,10 @@ pub fn run() -> Result<(), String> {
             })();
             ui.invoke_session_changed();
             match result {
-                Ok(()) => success(
-                    &ui,
-                    "全部设置已保存，配色、快捷键和锁定规则立即生效。".into(),
-                ),
+                Ok(()) => {
+                    ui.invoke_mark_settings_saved();
+                    success(&ui, "设置已保存。".into());
+                }
                 Err(message) => ui.set_status(message.into()),
             }
         });
@@ -3612,6 +3781,7 @@ pub fn run() -> Result<(), String> {
                 || main.get_account_batch()
                 || main.get_verification_active()
                 || main.get_blocked()
+                || (main.get_settings_open() && main.get_settings_dirty())
             {
                 main.set_status("请先完成主界面的操作，再从悬浮窗管理账号。".into());
                 return;
@@ -3777,7 +3947,7 @@ pub fn run() -> Result<(), String> {
                 main.set_update_error("请先完成当前验证或维护操作，再执行覆盖升级。".into());
                 return;
             }
-            if guard_editor(&main, 4) {
+            if guard_draft(&main, 4) {
                 main.set_about_open(false);
                 return;
             }
@@ -3985,6 +4155,7 @@ pub fn run() -> Result<(), String> {
                         let outcome = if generation != session.generation {
                             None
                         } else {
+                            let result = master_attempt_result(&mut session, result);
                             Some(result.and_then(|vault| session.accept(vault)))
                         };
                         drop(session);
@@ -4010,6 +4181,7 @@ pub fn run() -> Result<(), String> {
                         panel,
                         serial,
                         generation,
+                        master_password,
                         result,
                     } => {
                         let (ui, state) = if panel == 0 {
@@ -4040,6 +4212,11 @@ pub fn run() -> Result<(), String> {
                         }
                         let Some((action, _, started)) = state.requested else {
                             continue;
+                        };
+                        let result = if master_password {
+                            master_attempt_result(&mut session.borrow_mut(), result)
+                        } else {
+                            result
                         };
                         let result = result.and_then(|_| {
                             if started.elapsed() >= Duration::from_secs(60) {
@@ -4132,6 +4309,11 @@ pub fn run() -> Result<(), String> {
                         }
                         ctrl.busy = false;
                         main.set_update_checking(false);
+                        let settings_visible =
+                            main.get_settings_visible() && main.window().is_visible();
+                        let report = manual
+                            || settings_visible
+                            || (main.get_about_open() && main.window().is_visible());
                         match result {
                             Ok(CheckOutcome::Available(manifest)) => {
                                 let ver = manifest.version.clone();
@@ -4141,7 +4323,7 @@ pub fn run() -> Result<(), String> {
                                 main.set_update_error("".into());
                                 main.set_update_status("".into());
                                 ctrl.available = Some(manifest);
-                                if manual && main.get_settings_open() {
+                                if manual && settings_visible {
                                     success(
                                         &main,
                                         format!(
@@ -4153,22 +4335,22 @@ pub fn run() -> Result<(), String> {
                             Ok(CheckOutcome::UpToDate) => {
                                 ctrl.available = None;
                                 main.set_update_available(false);
-                                if manual {
+                                if report {
                                     let message = format!(
                                         "当前已是最新版本（v{}）。",
                                         env!("CARGO_PKG_VERSION")
                                     );
                                     main.set_update_error("".into());
                                     main.set_update_status(message.clone().into());
-                                    if main.get_settings_open() {
+                                    if settings_visible {
                                         success(&main, message);
                                     }
                                 }
                             }
                             Err(message) => {
-                                if manual {
+                                if report {
                                     main.set_update_error(message.clone().into());
-                                    if main.get_settings_open() {
+                                    if settings_visible {
                                         main.set_status(message.into());
                                     }
                                 }
@@ -4231,7 +4413,7 @@ pub fn run() -> Result<(), String> {
                                     );
                                     continue;
                                 }
-                                if guard_editor(&main, 4) {
+                                if guard_draft(&main, 4) {
                                     main.set_about_open(false);
                                     continue;
                                 }

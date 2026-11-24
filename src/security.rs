@@ -76,6 +76,60 @@ impl LockSettings {
     }
 }
 
+#[derive(Default)]
+pub struct MasterAttempts {
+    failures: u8,
+    retry_at: Option<Instant>,
+}
+
+impl MasterAttempts {
+    pub fn retry_message(&self, now: Instant) -> Option<String> {
+        let delay = self.retry_at?.checked_duration_since(now)?;
+        if delay.is_zero() {
+            return None;
+        }
+        Some(format!(
+            "多次验证失败，请在 {} 秒后重试。",
+            delay.as_secs() + u64::from(delay.subsec_nanos() != 0)
+        ))
+    }
+
+    pub fn rejected(&mut self, now: Instant) -> Option<String> {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= 5 {
+            self.retry_at = Some(now + Duration::from_secs(5));
+        }
+        self.retry_message(now)
+    }
+
+    pub fn accepted(&mut self) {
+        *self = Self::default();
+    }
+}
+
+pub fn master_strength_hint(value: &str) -> &'static str {
+    if value.is_empty() {
+        ""
+    } else if value.chars().count() < 10 {
+        "主密码至少需要 10 个字符。"
+    } else if value.chars().all(|c| c.is_ascii_digit())
+        || value.chars().all(|c| Some(c) == value.chars().next())
+        || ["password", "qwerty", "admin", "letmein"]
+            .iter()
+            .any(|pattern| {
+                value
+                    .get(..pattern.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(pattern))
+            })
+    {
+        "这个主密码容易猜到，建议用多个互不相关的词。"
+    } else if value.chars().count() < 16 {
+        "更长的主密码更难猜，建议使用至少 16 个字符。"
+    } else {
+        ""
+    }
+}
+
 // Shared with the native timer so file dialogs cannot suspend idle locking.
 pub struct LockClock(Mutex<(LockSettings, Instant, Option<u32>)>);
 impl LockClock {
@@ -231,6 +285,32 @@ pub fn generate_password(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn password_attempts_cool_down_and_success_resets_the_count() {
+        let now = Instant::now();
+        let mut attempts = MasterAttempts::default();
+        for _ in 0..4 {
+            assert!(attempts.rejected(now).is_none());
+        }
+        assert!(attempts.rejected(now).unwrap().contains('5'));
+        assert!(
+            attempts
+                .retry_message(now + Duration::from_secs(4))
+                .is_some()
+        );
+        assert!(
+            attempts
+                .retry_message(now + Duration::from_secs(5))
+                .is_none()
+        );
+        attempts.accepted();
+        assert!(attempts.rejected(now).is_none());
+        assert_eq!(master_strength_hint(""), "");
+        assert!(master_strength_hint("qWeRtY-Example").contains("容易猜到"));
+        assert!(master_strength_hint("1234567890123456").contains("容易猜到"));
+        assert_eq!(master_strength_hint("tree-delta-comet-plum"), "");
+    }
+
     #[test]
     fn settings_and_clock_distinguish_computer_from_vault_idle() {
         assert_eq!(

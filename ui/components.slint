@@ -3,18 +3,18 @@ import { LineEdit } from "std-widgets.slint";
 export global Theme {
     in-out property <int> scheme;
     in-out property <bool> dark;
-    out property <color> canvas: dark ? #151b23 : #f5f8fa;
-    out property <color> repaint-canvas: dark ? #151b24 : #f5f8f9;
-    out property <length> window-radius: 10px;
+    out property <color> canvas: dark ? #131820 : #f3f6f8;
+    out property <color> repaint-canvas: dark ? #131821 : #f3f6f9;
+    out property <length> window-radius: 12px;
     out property <length> control-height: 36px;
     out property <length> control-radius: 8px;
-    out property <color> surface: dark ? #1f2732 : #ffffff;
-    out property <color> surface-muted: dark ? #19202a : #edf2f6;
-    out property <color> window-line: dark ? #5b697a : #9aa9b5;
+    out property <color> surface: dark ? #1c2430 : #ffffff;
+    out property <color> surface-muted: dark ? #161c26 : #eaeff3;
+    out property <color> window-line: dark ? #627080 : #a7b5be;
     out property <string> match-color: dark ? "#ffc17a" : "#a43d00";
-    out property <color> ink: dark ? #eaf0f6 : scheme == 1 ? #172d4b : scheme == 2 ? #302342 : scheme == 3 ? #282e36 : #183431;
+    out property <color> ink: dark ? #eaf0f6 : scheme == 1 ? #172d4b : scheme == 2 ? #302342 : scheme == 3 ? #282e36 : #192d2b;
     out property <color> text: dark ? #c6d2de : #3a5057;
-    out property <color> muted: dark ? #97a8ba : #61747c;
+    out property <color> muted: dark ? #97a8ba : #53686f;
     out property <color> line: dark ? #384657 : #d8e2e7;
     out property <color> line-subtle: dark ? #2c3846 : #e4ecef;
     out property <color> brand: dark ? (scheme == 1 ? #86b7ff : scheme == 2 ? #c7a5f3 : scheme == 3 ? #b7c5d6 : #78cfc0) : scheme == 1 ? #245db0 : scheme == 2 ? #7043a6 : scheme == 3 ? #455264 : #11675f;
@@ -46,10 +46,38 @@ export component Surface inherits Rectangle {
 
 export component SectionCard inherits Rectangle {
     background: Theme.surface;
-    border-radius: 10px;
+    border-radius: Theme.control-radius;
     border-width: 1px;
     border-color: Theme.line-subtle;
     @children
+}
+
+export component PageHeading inherits VerticalLayout {
+    in property <string> title;
+    in property <string> description;
+    spacing: 3px;
+    Text { text: root.title; color: Theme.ink; font-size: 20px; font-weight: 700; }
+    if root.description != "": Text { text: root.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+}
+
+export component KeyHint inherits HorizontalLayout {
+    in property <string> keys;
+    in property <string> action;
+    spacing: 5px;
+    horizontal-stretch: 0;
+    Rectangle {
+        width: shortcut.preferred-width + 12px;
+        height: 21px;
+        border-radius: 5px;
+        border-width: 1px;
+        border-color: Theme.line;
+        background: Theme.canvas;
+        shortcut := Text {
+            text: root.keys; font-family: "Consolas"; font-size: 11px; font-weight: 600; color: Theme.ink;
+            horizontal-alignment: center; vertical-alignment: center;
+        }
+    }
+    if root.action != "": Text { text: root.action; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
 }
 
 export component SensitiveBadge inherits Rectangle {
@@ -89,7 +117,7 @@ export component StatusBanner inherits Rectangle {
     in property <bool> compact;
     height: max(root.compact ? 30px : 34px, message.preferred-height + (root.compact ? 12px : 16px));
     vertical-stretch: 0;
-    border-radius: 8px;
+    border-radius: Theme.control-radius;
     border-width: 1px;
     background: root.success ? Theme.success-soft : Theme.warning-soft;
     border-color: root.success ? Theme.success-line : Theme.warning-line;
@@ -188,14 +216,17 @@ export component SecretField inherits Rectangle {
     in-out property <bool> revealed;
     in property <int> mask-serial;
     in property <bool> read-only;
+    in property <bool> can-reveal: true;
+    callback toggle-reveal(bool);
+    toggle-reveal(show) => { root.revealed = show; }
     out property <bool> input-focused: input.has-focus;
     callback edited();
     callback accepted();
     forward-focus: input;
-    height: 36px;
+    height: Theme.control-height;
     vertical-stretch: 0;
-    changed text => { if (root.text == "") { root.revealed = false; } }
-    changed mask-serial => { root.revealed = false; }
+    changed text => { if (!root.read-only && root.text == "") { root.revealed = false; } }
+    changed mask-serial => { if (!root.read-only) { root.revealed = false; } }
     HorizontalLayout {
         spacing: 6px;
         input := LineEdit {
@@ -213,9 +244,9 @@ export component SecretField inherits Rectangle {
             text: root.revealed ? "隐藏" : "显示";
             label-padding: 10px;
             accessible-label: (root.revealed ? "隐藏" : "显示") + (root.label == "" ? root.placeholder-text : root.label);
-            enabled: root.enabled;
+            enabled: root.enabled && root.can-reveal;
             subtle: false;
-            clicked => { root.revealed = !root.revealed; }
+            clicked => { root.toggle-reveal(!root.revealed); }
         }
     }
 }

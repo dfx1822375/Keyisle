@@ -1,3 +1,4 @@
+use crate::security::MasterAttempts;
 use crate::vault::{PreparedSummary, Summary, Vault};
 use std::{
     collections::BTreeSet,
@@ -22,6 +23,7 @@ pub struct Session {
     pub working: bool,
     pub auth_owner: Option<usize>,
     pub notice: Option<String>,
+    pub master_attempts: MasterAttempts,
 }
 
 fn unique_name(prefix: &str) -> String {
@@ -58,6 +60,7 @@ impl Session {
             working: false,
             auth_owner: None,
             notice: None,
+            master_attempts: MasterAttempts::default(),
         })
     }
 

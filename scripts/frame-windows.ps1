@@ -22,6 +22,7 @@ public static class FrameNative {
  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr h);
  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
+ [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h,IntPtr after,int x,int y,int width,int height,uint flags);
  [DllImport("user32.dll")] public static extern void mouse_event(uint f,uint x,uint y,uint data,UIntPtr extra);
  [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint k,uint type);
 }
@@ -88,7 +89,24 @@ try{
  $after=[FrameRect]::new();[FrameNative]::GetWindowRect($h,[ref]$after)|Out-Null;Write-Output ('DRAG AFTER: '+$after.Left+','+$after.Top);Assert ([Math]::Abs($after.Left-$before.Left) -gt 20 -or [Math]::Abs($after.Top-$before.Top) -gt 20) 'Custom header drag failed'
  Write-Output 'PASS: content-sized frameless create page, real rounded region, custom minimize/restore and mouse dragging.'
  SetEdit 0 'GUI-Master-Only!2026';SetEdit 1 'GUI-Master-Only!2026';Button '创建密码库';Pause 1600;Capture 'frame-main.png'
- $before=(Main).Current.BoundingRectangle;[VaultTestNative]::SetForegroundWindow($h)|Out-Null;Pause 150;[FrameNative]::SetCursorPos([int]($before.Right-4*$scale),[int]($before.Bottom-4*$scale))|Out-Null;[FrameNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero);Pause 150;[FrameNative]::SetCursorPos([int]($before.Right+30*$scale),[int]($before.Bottom+20*$scale))|Out-Null;Pause 200;[FrameNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero);Pause 300;$resized=(Main).Current.BoundingRectangle;Write-Output ("RESIZE before=$($before.Width)x$($before.Height) after=$($resized.Width)x$($resized.Height)");Capture 'frame-resized.png';Assert ($resized.Width -gt $before.Width+20) 'Native corner resize failed'
+ $desktop=(Main).Current.BoundingRectangle
+ Assert ((TextExists '分类 · 标签') -eq (($desktop.Width/$scale) -ge 720)) 'First management view used the previous page width'
+ [FrameNative]::SetWindowPos($h,[IntPtr]::Zero,0,0,[int](660*$scale),[int]$desktop.Height,6)|Out-Null;Pause 250
+ Assert (-not (TextExists '分类 · 标签')) 'Account list did not switch to the narrow layout'
+ [FrameNative]::SetWindowPos($h,[IntPtr]::Zero,0,0,[int]$desktop.Width,[int]$desktop.Height,6)|Out-Null;Pause 250
+ Assert ((TextExists '分类 · 标签') -eq (($desktop.Width/$scale) -ge 720)) 'Account list did not return to the wide layout'
+ $area=[Windows.Forms.Screen]::FromHandle($h).WorkingArea
+ [FrameNative]::SetWindowPos($h,[IntPtr]::Zero,$area.Left+36,$area.Top+36,0,0,5)|Out-Null
+ Pause 250
+ $before=(Main).Current.BoundingRectangle;[VaultTestNative]::SetForegroundWindow($h)|Out-Null;Pause 150;$corner=$null
+ foreach($inset in @(4,5,5.5)){
+  $point=[FramePoint]::new()
+  $point.X=[int]($before.Right-$inset*$scale);$point.Y=[int]($before.Bottom-$inset*$scale)
+  $packed=[IntPtr](($point.X -band 65535) -bor (($point.Y -band 65535) -shl 16))
+  if([FrameNative]::WindowFromPoint($point) -eq $h -and [FrameNative]::SendMessage($h,0x84,[IntPtr]::Zero,$packed).ToInt32() -eq 17){$corner=$point;break}
+ }
+ Assert ($null -ne $corner) 'Rounded corner has no visible native resize target'
+ [FrameNative]::SetCursorPos($corner.X,$corner.Y)|Out-Null;[FrameNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero);Pause 150;[FrameNative]::SetCursorPos([int]($before.Right+30*$scale),[int]($before.Bottom+20*$scale))|Out-Null;Pause 200;[FrameNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero);Pause 300;$resized=(Main).Current.BoundingRectangle;Write-Output ("RESIZE before=$($before.Width)x$($before.Height) after=$($resized.Width)x$($resized.Height)");Capture 'frame-resized.png';Assert ($resized.Width -gt $before.Width+20) 'Native corner resize failed'
 
  # Every edge/corner must return the native resize hit code, including negative-capable coordinates.
  $r=(Main).Current.BoundingRectangle
@@ -126,9 +144,14 @@ try{
  Button '取消删除'
 
  $row=@(Visible (Main) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Button)|Where-Object{$_.Current.Name -like '*Frame row，*'})[0].Current.BoundingRectangle
+ $bounds=(Main).Current.BoundingRectangle
+ Assert ($row.Width -gt 0 -and $row.Right -le $bounds.Right) 'Account row retained the maximized viewport after restore'
  $x=[int]($row.Left+$row.Width/2);$y=[int]($row.Top+$row.Height/2)
+ [VaultTestNative]::SetForegroundWindow($h)|Out-Null;Pause 150
+ $target=[FramePoint]::new();$target.X=$x;$target.Y=$y
+ Assert ([VaultTestNative]::GetForegroundWindow() -eq $h -and [FrameNative]::WindowFromPoint($target) -eq $h) 'Row double-click did not target the foreground test window'
  [FrameNative]::SetCursorPos($x,$y)|Out-Null
- foreach($i in 1..2){[FrameNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero);[FrameNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero);Pause 80};Pause 300
+ foreach($i in 1..2){[FrameNative]::mouse_event(2,0,0,0,[UIntPtr]::Zero);Pause 30;[FrameNative]::mouse_event(4,0,0,0,[UIntPtr]::Zero);Pause 85};Pause 450
  Assert (TextExists '账号信息') 'Double-click did not edit account';Assert ((Edits)[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -eq 'Frame row') 'Double-click selected a different account';Button '取消编辑'
 
  $row=@(Visible (Main) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Button)|Where-Object{$_.Current.Name -like '*Frame row，*'})[0].Current.BoundingRectangle

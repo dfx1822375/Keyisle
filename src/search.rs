@@ -193,7 +193,7 @@ fn text_score(text: &str, token: &str) -> Option<i32> {
     None
 }
 
-fn query_tokens(query: &str) -> Option<Vec<String>> {
+pub fn query_tokens(query: &str) -> Option<Vec<String>> {
     let query = normalized(query);
     if query.chars().count() > 128 {
         return None;
@@ -208,7 +208,10 @@ fn query_tokens(query: &str) -> Option<Vec<String>> {
 }
 
 pub fn score_prepared(query: &str, fields: &[(&PreparedField, i32)]) -> Option<i32> {
-    let tokens = query_tokens(query)?;
+    score_tokens(&query_tokens(query)?, fields)
+}
+
+pub(crate) fn score_tokens(tokens: &[String], fields: &[(&PreparedField, i32)]) -> Option<i32> {
     if tokens.is_empty() {
         return Some(0);
     }
@@ -247,7 +250,7 @@ pub fn score(query: &str, fields: &[(&str, i32)]) -> Option<i32> {
         .map(|(text, weight)| (PreparedField::new(text), *weight))
         .collect();
     let refs: Vec<(&PreparedField, i32)> = prepared.iter().map(|(p, w)| (p, *w)).collect();
-    score_prepared(query, &refs)
+    score_tokens(&tokens, &refs)
 }
 
 fn match_positions(text: &str, token: &str) -> Option<Vec<usize>> {
@@ -276,9 +279,13 @@ fn match_positions(text: &str, token: &str) -> Option<Vec<usize>> {
 
 /// Original visible characters with match spans; never accepts credential secrets.
 pub fn highlights(query: &str, text: &str) -> Vec<(String, bool)> {
-    let Some(tokens) = query_tokens(query).filter(|tokens| !tokens.is_empty()) else {
+    highlights_for_tokens(&query_tokens(query).unwrap_or_default(), text)
+}
+
+pub fn highlights_for_tokens(tokens: &[String], text: &str) -> Vec<(String, bool)> {
+    if tokens.is_empty() {
         return vec![(text.to_string(), false)];
-    };
+    }
     let chars: Vec<_> = text.chars().collect();
     let mut marks = vec![false; chars.len()];
     let mut original = String::new();
@@ -314,8 +321,8 @@ pub fn highlights(query: &str, text: &str) -> Vec<(String, bool)> {
         if let Some((_, positions, mapping, source)) = candidates
             .into_iter()
             .filter_map(|(text, mapping, source, penalty)| {
-                text_score(text, &token)
-                    .zip(match_positions(text, &token))
+                text_score(text, token)
+                    .zip(match_positions(text, token))
                     .map(|(score, positions)| (score - penalty, positions, mapping, source))
             })
             .max_by_key(|(score, _, _, _)| *score)

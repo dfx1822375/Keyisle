@@ -103,7 +103,7 @@ try{
  Assert ((Get-FileHash -LiteralPath $external -Algorithm SHA256).Hash -eq $exportHash) 'Reset altered external manual backup'
  SetEdit 0 'GUI-New-Master!2026';SetEdit 1 'GUI-New-Master!2026';Button '创建密码库';Pause 1400
  Assert (TextExists '0 个账号') 'New vault after reset contains old records'
- Assert (TextExists '电脑空闲 5 分钟自动锁定 · 不自动提交登录') 'Reset did not restore default idle policy'
+ Assert (TextExists '电脑空闲 5 分钟锁定') 'Reset did not restore default idle policy'
  Button '锁定';SetEdit 0 'GUI-Master-Only!2026';Button '解锁';Pause 1000;Assert (TextExists '解锁密码库') 'Old master opened newly-created vault';Unlock 'GUI-New-Master!2026'
  Write-Output 'PASS: authenticated reset removes current/original/restored vaults, managed backups and all preference files; restarts to defaults; external backup survives and old master cannot open the new vault.'
  Button '设置';InvokeNamed '一键还原';SetResetMaster 'GUI-New-Master!2026';Toggle '我确认永久清除上述数据并恢复默认设置'

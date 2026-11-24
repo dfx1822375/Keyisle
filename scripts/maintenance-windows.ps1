@@ -24,7 +24,7 @@ function Maximize {
  $h=[IntPtr](Main).Current.NativeWindowHandle;if(-not [MaintenanceNative]::IsZoomed($h)){Button '最大化或还原窗口'}
  Pause 500;Assert ([MaintenanceNative]::IsZoomed($h)) 'Custom maximize failed'
 }
-function OpenMaintenance { Button '设置'; Button '主密码与本地备份' }
+function OpenMaintenance { Button '设置'; Button '备份与维护'; Button '主密码与本地备份' }
 function FormSet([string]$name,[string]$value) {
  $fields = @(Visible (Main) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit) | Where-Object { $_.Current.Name -eq $name })
  Assert ($fields.Count -eq 1) "Maintenance field missing: $name"
@@ -83,13 +83,13 @@ try {
  Button '新增账号'; SetEdit 0 'Rotation test'; SetEdit 1 'synthetic.user'; SetEdit 2 'Synthetic-Account!2026'; Button '保存账号'
  Button '编辑账号'; SetEdit 0 'Rotation test edited'; Button '保存账号'
  $manual = Join-Path $DataDir 'manual-export.db'
- Button '加密备份'; DialogFile '保存加密备份（请选择新文件）' $manual
+ Button '备份管理'; Button '加密备份'; DialogFile '保存加密备份（请选择新文件）' $manual; Button '返回账号列表'
  Copy-Item (Join-Path $DataDir 'vault.db') (Join-Path $DataDir 'vault.pre-v04-1.db')
  $manualHash = (Get-FileHash $manual).Hash
  $before = @(Get-ChildItem (Join-Path $DataDir 'backups') -Filter 'auto-*.db').Count
  Assert ($before -eq 1) 'Expected one synthetic automatic backup'
  OpenMaintenance
- Assert (TextExists '本地备份：2 个') 'Managed backup count is wrong'
+ Assert (TextExists '受管本地备份：2 个') 'Managed backup count is wrong'
  Capture 'maintenance.png'
  $fields = @(Edits)
  Assert ($fields.Count -eq 3) 'Expected current/new/confirmation password fields'
@@ -108,7 +108,7 @@ try {
  Button '清除全部本地备份'
  Assert (Test-Path (Join-Path $DataDir 'vault.pre-v04-1.db')) 'Clear deleted a backup before confirmation'
  Button '取消清除'
- Assert (TextExists '本地备份：2 个') 'Cancel changed backup count'
+ Assert (TextExists '受管本地备份：2 个') 'Cancel changed backup count'
  Write-Output 'PASS: backup count, masked fields, show/hide, confirmation validation, clear cancellation, input cleanup.'
 
  FormSet '当前主密码' 'wrong-current-master'; FormSet '新主密码' $new; FormSet '确认新主密码' $new
@@ -146,7 +146,7 @@ try {
  Assert (Test-Path (Join-Path $DataDir 'vault.db')) 'Clear removed live vault'
  Assert ((Get-FileHash $manual).Hash -eq $manualHash) 'Clear removed or modified manual export'
  Unlock $new; OpenMaintenance
- Assert (TextExists '本地备份：0 个') 'Zero-backup state missing'
+ Assert (TextExists '受管本地备份：0 个') 'Zero-backup state missing'
  Capture 'maintenance-empty.png'
  Button '返回设置'; Button '返回账号列表'
  Button '编辑账号'; SetEdit 0 'After clearing'; Button '保存账号'

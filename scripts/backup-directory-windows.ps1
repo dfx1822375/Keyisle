@@ -17,7 +17,7 @@ try {
  StartApp -NoFocus
  SetEdit 0 $master; SetEdit 1 $master; Button '创建密码库' 1300
  Copy-Item -LiteralPath (Join-Path $DataDir 'vault.db') -Destination (Join-Path $preferred 'existing-backup.db')
- Button '设置'
+ Button '设置'; Button '备份与维护'
  $pathEdit=@(Edits | Where-Object {$_.Current.Name -eq '默认备份目录'})
  Assert ($pathEdit.Count -eq 1) 'Backup directory edit missing'
  $pathEdit[0].SetFocus()
@@ -29,7 +29,9 @@ try {
  Pause 550
  $pathEdit=@(Edits | Where-Object {$_.Current.Name -eq '默认备份目录'})
  $pathEdit[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($preferred)
+ Assert (TextExists '有未保存的设置') 'Edited preference did not show the unsaved indicator'
  Button '保存设置' 700
+ Assert (!(TextExists '有未保存的设置')) 'Saving preferences did not clear the unsaved indicator'
  $setting=Join-Path $DataDir 'backup-directory.txt'
  Assert ((Get-Content -LiteralPath $setting -Raw) -eq $preferred) 'Default folder did not persist'
  Button '返回账号列表'; Button '备份管理'

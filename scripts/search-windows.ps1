@@ -78,19 +78,19 @@ try {
  Send '{ESC}' (Popup)
  Write-Output 'PASS: successful fills update recent ordering and persist after restart; search relevance wins; failed and canceled actions do not reorder; arrows choose results.'
  Manage;SetEdit 0 '企业';Button '编辑账号'
- $box=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '敏感项：使用、查看和编辑前再次验证')[0]
+ $box=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '敏感项：填充、查看、编辑和删除前验证')[0]
  $box.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle();Button '保存账号';Button '编辑账号'
- Assert (TextExists '当前方式：Windows 账户密码') 'Verification default is not Windows password'
- Send '{TAB}';Assert (TextExists '当前方式：Windows PIN / Hello') 'Tab did not switch to Hello'
- Send '{TAB}';Assert (TextExists '当前方式：密码库主密码') 'Tab did not switch to vault master'
- Send '+{TAB}';Assert (TextExists '当前方式：Windows PIN / Hello') 'Shift Tab did not reverse modes'
+ Assert (TextExists '打开 Windows 验证') 'Verification default is not Windows password'
+ Send '{TAB}';Assert (TextExists 'Windows PIN / Hello') 'Tab did not switch to Hello'
+ Send '{TAB}';Assert (TextExists '验证主密码') 'Tab did not switch to vault master'
+ Send '+{TAB}';Assert (TextExists 'Windows PIN / Hello') 'Shift Tab did not reverse modes'
  Send '{TAB}';SetEdit 0 'GUI-Master-Only!2026';Button '验证主密码';Pause 1000
  Assert (TextExists '账号信息') 'Keyboard-selected master verification failed'
  Button '取消编辑';Button '编辑账号'
- Assert (TextExists '当前方式：Windows 账户密码') 'New verification reused prior mode or authorization'
+ Assert (TextExists '打开 Windows 验证') 'New verification reused prior mode or authorization'
  Button '取消验证'
  Write-Output 'PASS: each sensitive action defaults to Windows password; Tab and Shift Tab cycle verification modes; master verification remains single-use.'
- Button '设置';$old=(Edits)[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+ Button '设置';Button '快捷填充';$old=(Edits)[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
  Button '录制快捷键';Send 'p';Assert (TextExists '取消录制') 'Unmodified key accepted'
  Send '{ESC}';Assert ((Edits)[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -eq $old) 'Cancel changed shortcut'
  Button '录制快捷键'

@@ -9,6 +9,7 @@ use std::{
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
+pub const MASTER_REJECTED: &str = "主密码不正确，或无法解密密码库。";
 const APP_ID: i32 = 0x504D4752;
 
 #[derive(Default)]
@@ -66,14 +67,24 @@ impl PreparedSummary {
     }
 
     pub fn rank(&self, summary: &Summary, query: &str, category: &str, tag: &str) -> Option<i32> {
+        self.rank_tokens(summary, &crate::search::query_tokens(query)?, category, tag)
+    }
+
+    pub fn rank_tokens(
+        &self,
+        summary: &Summary,
+        tokens: &[String],
+        category: &str,
+        tag: &str,
+    ) -> Option<i32> {
         if !category.is_empty() && summary.category != category {
             return None;
         }
         if !tag.is_empty() && !self.tag_list.iter().any(|item| item == tag) {
             return None;
         }
-        crate::search::score_prepared(
-            query,
+        crate::search::score_tokens(
+            tokens,
             &[
                 (&self.title, 120),
                 (&self.username, 100),
@@ -154,11 +165,15 @@ impl Vault {
         ))?;
         db(conn.busy_timeout(Duration::from_secs(2)))?;
         // Reading schema authenticates the password before any persistent settings change.
-        db(
-            conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-                r.get::<_, i64>(0)
-            }),
-        )?;
+        let schema_probe = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        if !create
+            && matches!(&schema_probe, Err(rusqlite::Error::SqliteFailure(error, _)) if error.code == rusqlite::ErrorCode::NotADatabase)
+        {
+            return Err(MASTER_REJECTED.into());
+        }
+        db(schema_probe)?;
         if !create {
             let app_id: i32 = db(conn.query_row("PRAGMA application_id", [], |r| r.get(0)))?;
             let schema: i32 = db(conn.query_row("PRAGMA user_version", [], |r| r.get(0)))?;
@@ -360,6 +375,26 @@ impl Vault {
         })))
     }
 
+    pub fn details(&self, id: i64) -> Result<(Credential, bool)> {
+        db(self.conn.query_row(
+            "SELECT id,title,username,category,tags,url,notes,sensitive,password<>'' FROM credentials WHERE id=?1",
+            [id],
+            |r| Ok((Credential {
+                id: r.get(0)?, title: r.get(1)?, username: r.get(2)?, category: r.get(3)?,
+                tags: r.get(4)?, url: r.get(5)?, notes: r.get(6)?, sensitive: r.get(7)?,
+                ..Credential::default()
+            }, r.get(8)?)),
+        ))
+    }
+
+    pub fn password(&self, id: i64) -> Result<Zeroizing<String>> {
+        db(self.conn.query_row(
+            "SELECT password FROM credentials WHERE id=?1",
+            [id],
+            |row| row.get::<_, String>(0).map(Zeroizing::new),
+        ))
+    }
+
     pub fn save(&mut self, record: &Credential) -> Result<i64> {
         if record.title.trim().is_empty() {
             return Err("名称不能为空。".into());
@@ -488,6 +523,35 @@ mod tests {
         assert_eq!(vault.list().unwrap().len(), 2);
         vault.delete_many(&[first, second]).unwrap();
         assert!(vault.list().unwrap().is_empty());
+        drop(vault);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn details_only_indicate_password_presence_and_rejection_is_distinct() {
+        let root =
+            std::env::temp_dir().join(format!("private-details-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("vault.db");
+        let mut vault = super::Vault::create(&path, "Details-Test!2026").unwrap();
+        let id = vault
+            .save(&super::Credential {
+                title: "Synthetic".into(),
+                password: zeroize::Zeroizing::new("Hidden-Only!".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let (details, has_password) = vault.details(id).unwrap();
+        assert!(has_password && details.password.is_empty());
+        assert_eq!(vault.password(id).unwrap().as_str(), "Hidden-Only!");
+        assert_eq!(
+            super::Vault::verify_master(&path, "Wrong-Only!").unwrap_err(),
+            super::MASTER_REJECTED
+        );
+        assert_ne!(
+            super::Vault::verify_master(&root.join("missing.db"), "Wrong-Only!").unwrap_err(),
+            super::MASTER_REJECTED
+        );
         drop(vault);
         std::fs::remove_dir_all(root).unwrap();
     }

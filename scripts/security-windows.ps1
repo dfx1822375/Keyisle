@@ -157,11 +157,11 @@ try {
  Assert ($settings[0] -eq '15' -and $settings[1] -eq 'vault') 'Settings were not saved correctly'
  StopApp
  StartApp; Unlock
- Assert (TextExists '密码库空闲 15 分钟自动锁定 · 不自动提交登录') 'Settings did not survive restart'
+ Assert (TextExists '密码库空闲 15 分钟锁定') 'Settings did not survive restart'
  Write-Output 'PASS: sensitive deletion cannot bypass verification; flag and configurable timeout survive restart.'
  if ($TestIdle) {
   Button '设置'; SelectCombo 0 0; SelectCombo 1 1; Button '保存设置'; Button '返回账号列表'
-  Assert (TextExists '密码库空闲 1 分钟自动锁定 · 不自动提交登录') 'One-minute setting not applied'
+  Assert (TextExists '密码库空闲 1 分钟锁定') 'One-minute setting not applied'
   Write-Output 'STAGE: waiting for one-minute vault inactivity while a separate app receives input.'
   $receiver = [Windows.Forms.Form]::new()
   $receiver.Text = 'Password Manager - separate idle-test receiver'
