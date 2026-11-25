@@ -768,7 +768,7 @@ mod tests {
             profile.0.join("backups")
         );
         assert!(save_backup_directory(&profile.0, "relative/path").is_err());
-        let snapshot = Snapshot::capture(&profile.0).unwrap();
+        let snapshot = Snapshot::capture(&profile.0, false).unwrap();
         save_backup_directory(&profile.0, custom.to_str().unwrap()).unwrap();
         assert_eq!(backup_dialog_directory(&profile.0).unwrap(), custom);
         let listed: BTreeSet<_> = backup_list(&profile.0, &active)
@@ -975,6 +975,9 @@ const RESET_SETTINGS: &[&str] = &[
     "settings-rollback-5.tmp",
     "settings-rollback-6.tmp",
     "settings-rollback-7.tmp",
+    "settings-rollback-8.tmp",
+    crate::settings::WALLPAPER_FILE,
+    crate::settings::WALLPAPER_TEMP,
 ];
 
 fn reset_owned(relative: &Path) -> bool {
@@ -1204,9 +1207,17 @@ mod reset_tests {
     #[test]
     fn reset_authenticates_before_commit_and_clears_all_owned_files_only() {
         let (root, active) = fixture("scope");
+        let wallpaper = root.join(crate::settings::WALLPAPER_FILE);
+        fs::write(&wallpaper, b"saved wallpaper").unwrap();
+        fs::write(root.join("user-photo.png"), b"original image").unwrap();
         let cancel = AtomicBool::new(false);
         let files = reset_inventory(&root, &active).unwrap();
         assert!(files.iter().any(|p| p == Path::new("restored-456-1.db")));
+        assert!(
+            files
+                .iter()
+                .any(|p| p == Path::new(crate::settings::WALLPAPER_FILE))
+        );
         assert!(begin_reset(&root, &active, "wrong", &cancel).is_err());
         assert!(!reset_pending(&root));
         assert_eq!(fs::read(root.join("theme.txt")).unwrap(), b"original");
@@ -1224,6 +1235,7 @@ mod reset_tests {
         for file in files {
             assert!(!root.join(file).exists());
         }
+        assert!(root.join("user-photo.png").is_file());
         assert!(Vault::open(&root.join("manual-export.db"), "Reset-Only!2026").is_ok());
         fs::remove_dir_all(root).unwrap();
     }

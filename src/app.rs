@@ -1,4 +1,5 @@
-use crate::platform::{self, BackupDialog, Event, Native, Target};
+use crate::platform::{self, Event, FileDialog, Native, Target};
+use crate::wallpaper;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
 use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
@@ -110,6 +111,8 @@ fn clear_editor(ui: &AppWindow) {
     ui.set_edit_password("".into());
     ui.set_edit_category("".into());
     ui.set_edit_tags("".into());
+    ui.set_edit_category_choice(0);
+    ui.set_edit_tag_choice(0);
     ui.set_edit_url("".into());
     ui.set_edit_notes("".into());
     ui.set_edit_sensitive(false);
@@ -119,6 +122,7 @@ fn clear_editor(ui: &AppWindow) {
 fn clear_details(ui: &AppWindow) {
     ui.set_details_open(false);
     ui.set_details_title("".into());
+    ui.set_details_sensitive(false);
     ui.set_details_user("".into());
     ui.set_details_has_password(false);
     ui.set_details_category("".into());
@@ -384,16 +388,39 @@ fn refresh(ui: &AppWindow, state: &mut State) {
     };
     for (_, record) in ranked {
         state.matches.push(record.id);
-        let accessible_title = if record.sensitive {
-            format!("敏感 · {}", record.title)
-        } else {
-            record.title.clone()
-        };
         let username = if record.sensitive {
             "使用前需验证".to_string()
         } else {
             record.username
         };
+        let mut row = EntryRow {
+            title: record.title.as_str().into(),
+            username: username.as_str().into(),
+            sensitive: record.sensitive,
+            checked: state.account_checks.contains(&record.id),
+            ..EntryRow::default()
+        };
+        if tokens.is_empty() {
+            if !query.is_empty() {
+                row.title_rich = slint::StyledText::from_plain_text(&record.title);
+            }
+            if compact {
+                row.hint_rich = slint::StyledText::from_plain_text(&username);
+                row.hint = row.username.clone();
+            } else {
+                let detail = match (record.category.is_empty(), record.tags.is_empty()) {
+                    (_, true) => record.category,
+                    (true, false) => record.tags,
+                    (false, false) => format!("{} · {}", record.category, record.tags),
+                };
+                row.user_rich = slint::StyledText::from_plain_text(&username);
+                row.detail_rich = slint::StyledText::from_plain_text(&detail);
+                row.detail = detail.into();
+            }
+            rows.push(row);
+            continue;
+        }
+
         let username_spans = highlighter(if record.sensitive { &[] } else { tokens }, &username);
         let category = metadata_spans(record.category);
         let tags = metadata_spans(record.tags);
@@ -422,44 +449,25 @@ fn refresh(ui: &AppWindow, state: &mut State) {
         }
         let meta_text: String = metadata.iter().map(|(part, _)| *part).collect();
         let meta_rich = rich(color.as_str(), &meta_text, &metadata);
-        let (hint, hint_rich, detail, detail_rich, user_rich) = if compact {
-            (
-                meta_text,
-                meta_rich,
-                String::new(),
-                slint::StyledText::default(),
-                slint::StyledText::default(),
-            )
+        if compact {
+            row.hint = meta_text.into();
+            row.hint_rich = meta_rich;
         } else {
             let user = username_spans
                 .iter()
                 .map(|(part, hit)| (part.as_str(), *hit))
                 .collect::<Vec<_>>();
-            (
-                String::new(),
-                slint::StyledText::default(),
-                meta_text,
-                meta_rich,
-                rich(color.as_str(), &username, &user),
-            )
-        };
+            row.detail = meta_text.into();
+            row.detail_rich = meta_rich;
+            row.user_rich = rich(color.as_str(), &username, &user);
+        }
         let title = highlighter(tokens, &record.title);
         let title_spans = title
             .iter()
             .map(|(part, hit)| (part.as_str(), *hit))
             .collect::<Vec<_>>();
-        rows.push(EntryRow {
-            title_rich: rich(color.as_str(), &record.title, &title_spans),
-            user_rich,
-            detail_rich,
-            hint_rich,
-            hint: hint.into(),
-            title: accessible_title.into(),
-            username: username.into(),
-            detail: detail.into(),
-            sensitive: record.sensitive,
-            checked: state.account_checks.contains(&record.id),
-        });
+        row.title_rich = rich(color.as_str(), &record.title, &title_spans);
+        rows.push(row);
     }
     if !compact {
         if let Some(model) = changed_options(&ui.get_edit_categories(), "选择已有分类", &categories)
@@ -528,11 +536,14 @@ fn selected_id(ui: &AppWindow, state: &State) -> Option<i64> {
 }
 
 enum JobResult {
+    WallpaperLoaded(u64, Result<Option<(image::DynamicImage, i32)>, String>),
+    WallpaperImported(u64, Result<wallpaper::ImportedWallpaper, String>),
     Reset(Result<(), String>),
     Unlock(u64, Result<Vault, String>),
     Maintenance(Result<String, String>),
     Backup {
         generation: u64,
+        current_vault_master: bool,
         result: Result<BackupOutcome, String>,
     },
     Verify {
@@ -840,7 +851,13 @@ fn bind(
         context_record: None,
     }));
     let timer = Rc::new(Timer::default());
-    ui.on_master_strength_hint(|password| security::master_strength_hint(password.as_str()).into());
+    ui.on_master_strength_hint(|password| {
+        let (level, message) = security::master_strength_hint(password.as_str());
+        StrengthHint {
+            level,
+            message: message.into(),
+        }
+    });
     {
         let weak = ui.as_weak();
         ui.on_open_slint_site(move || {
@@ -1007,10 +1024,15 @@ fn bind(
             let action = ui.get_discard_action();
             ui.set_discard_action(0);
             if !discard {
-                ui.invoke_focus_search();
+                if ui.get_discard_settings() && ui.get_about_open() {
+                    ui.invoke_close_about();
+                } else {
+                    ui.invoke_focus_search();
+                }
                 return;
             }
             if ui.get_discard_settings() {
+                ui.invoke_reset_wallpaper_draft();
                 ui.invoke_mark_settings_saved();
                 ui.set_settings_open(false);
                 ui.set_about_from_settings(false);
@@ -1138,7 +1160,7 @@ fn bind(
                 Ok(generated) => {
                     ui.set_edit_password(generated.as_str().into());
                     ui.set_edit_dirty(true);
-                    success(&ui, "已生成 20 位高强度随机密码，保存账号后生效。".into());
+                    success(&ui, format!("已生成 {length} 位随机密码，保存账号后生效。"));
                 }
                 Err(message) => ui.set_status(message.into()),
             }
@@ -1177,6 +1199,7 @@ fn bind(
                     state.details_id = Some(id);
                     state.clock.touch();
                     ui.set_details_title(record.title.into());
+                    ui.set_details_sensitive(record.sensitive);
                     ui.set_details_user(record.username.into());
                     ui.set_details_has_password(has_password);
                     ui.set_details_category(record.category.into());
@@ -1765,6 +1788,7 @@ fn bind(
             ui.set_appearance_choice(ui.get_appearance_mode());
             ui.set_screen_protection_choice(screen_protection);
             ui.set_auto_update_choice(auto_update);
+            ui.invoke_reset_wallpaper_draft();
             ui.invoke_mark_settings_saved();
             ui.set_settings_open(true);
             ui.invoke_scroll_settings_top();
@@ -1791,11 +1815,9 @@ fn bind(
                 } else {
                     settings::backup_dialog_directory(&root)?
                 };
-                if let Some(folder) = platform::choose_backup_path(
-                    window_id(&ui)?,
-                    &initial,
-                    BackupDialog::Directory,
-                )? && available(&state.borrow())
+                if let Some(folder) =
+                    platform::choose_path(window_id(&ui)?, &initial, FileDialog::Directory)?
+                    && available(&state.borrow())
                     && ui.get_settings_open()
                 {
                     ui.set_backup_directory_choice(folder.to_string_lossy().as_ref().into());
@@ -1962,6 +1984,17 @@ fn bind(
                 state.clock.touch();
                 return;
             }
+            if !restore
+                && let Some(message) = state
+                    .borrow()
+                    .session
+                    .borrow()
+                    .master_attempts
+                    .retry_message(Instant::now())
+            {
+                ui.set_status(message.into());
+                return;
+            }
             let master = Zeroizing::new(ui.get_backup_master().to_string());
             ui.set_backup_master("".into());
             reset_secret_masks(&ui);
@@ -1999,7 +2032,11 @@ fn bind(
                     maintenance::delete_backups(&root, &active, &sources, &master, &cancel)
                         .map(BackupOutcome::Deleted)
                 };
-                jobs.send(JobResult::Backup { generation, result });
+                jobs.send(JobResult::Backup {
+                    generation,
+                    current_vault_master: !restore,
+                    result,
+                });
             });
         };
         if restore {
@@ -2126,6 +2163,16 @@ fn bind(
                 reset_secret_masks(&ui);
                 ui.set_status("请核对备份数量，输入当前主密码，再确认清除。".into());
                 state.borrow().clock.touch();
+                return;
+            }
+            if let Some(message) = state
+                .borrow()
+                .session
+                .borrow()
+                .master_attempts
+                .retry_message(Instant::now())
+            {
+                ui.set_status(message.into());
                 return;
             }
             let old = Zeroizing::new(ui.get_current_master().to_string());
@@ -2776,6 +2823,15 @@ pub fn run() -> Result<(), String> {
         });
     }
     for ui in [&main, &popup] {
+        let weak = ui.as_weak();
+        ui.on_apply_fluent_accent(move |color| {
+            if let Some(ui) = weak.upgrade() {
+                // Fluent reads the backend accent and adjusts its lightness for the color scheme.
+                slint::private_unstable_api::re_exports::WindowInner::from_pub(ui.window())
+                    .context()
+                    .set_accent_color(color);
+            }
+        });
         ui.set_theme_index(theme);
         ui.set_system_dark(platform::system_dark());
         ui.set_appearance_mode(appearance);
@@ -2968,7 +3024,13 @@ pub fn run() -> Result<(), String> {
             if let Some(ui) = weak.upgrade() {
                 if matches!(event, WindowEvent::ThemeChanged(_)) {
                     ui.set_system_dark(platform::system_dark());
-                    ui.invoke_apply_appearance();
+                    // Winit applies its system accent after this hook returns.
+                    let weak = weak.clone();
+                    Timer::single_shot(Duration::ZERO, move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_apply_appearance();
+                        }
+                    });
                 }
                 if !ui.get_compact()
                     && !layout_paused.get()
@@ -3246,6 +3308,92 @@ pub fn run() -> Result<(), String> {
     if !reset_boot {
         update::cleanup_staging(&root);
     }
+    for ui in [&main, &popup] {
+        ui.set_wallpaper_transparency(wallpaper::DEFAULT_TRANSPARENCY as f32);
+        ui.set_wallpaper_max_transparency(wallpaper::MAX_TRANSPARENCY as f32);
+    }
+    let wallpaper_generation = Rc::new(Cell::new(None::<u64>));
+    let wallpaper_serial = Rc::new(Cell::new(0u64));
+    let wallpaper_draft = Rc::new(RefCell::new(None::<Vec<u8>>));
+    {
+        let weak = main.as_weak();
+        let serial = wallpaper_serial.clone();
+        let draft = wallpaper_draft.clone();
+        main.on_reset_wallpaper_draft(move || {
+            if let Some(ui) = weak.upgrade() {
+                serial.set(serial.get().wrapping_add(1));
+                draft.borrow_mut().take();
+                ui.set_wallpaper_importing(false);
+                ui.set_wallpaper_preview(ui.get_wallpaper_image());
+                ui.set_wallpaper_transparency_choice(ui.get_wallpaper_transparency());
+                ui.set_wallpaper_revision(0);
+            }
+        });
+    }
+    {
+        let weak = main.as_weak();
+        let state = main_state.clone();
+        let session = session.clone();
+        let serial = wallpaper_serial.clone();
+        let jobs = jobs.clone();
+        main.on_choose_wallpaper(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if !available(&state.borrow())
+                || !ui.get_settings_open()
+                || ui.get_wallpaper_loading()
+                || ui.get_wallpaper_importing()
+            {
+                return;
+            }
+            ui.invoke_cancel_recording();
+            let result = (|| {
+                let directory = std::env::var_os("USERPROFILE")
+                    .map(|path| PathBuf::from(path).join("Pictures"))
+                    .filter(|path| path.is_dir())
+                    .unwrap_or_else(|| session.borrow().root.clone());
+                let request = serial.get();
+                if let Some(path) =
+                    platform::choose_path(window_id(&ui)?, &directory, FileDialog::Wallpaper)?
+                    && serial.get() == request
+                    && available(&state.borrow())
+                    && ui.get_settings_open()
+                {
+                    ui.set_wallpaper_importing(true);
+                    state.borrow().clock.touch();
+                    let jobs = jobs.clone();
+                    std::thread::spawn(move || {
+                        jobs.send(JobResult::WallpaperImported(
+                            request,
+                            wallpaper::import(&path),
+                        ));
+                    });
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(message) = result {
+                ui.set_status(message.into());
+            }
+        });
+    }
+    {
+        let weak = main.as_weak();
+        let state = main_state.clone();
+        let draft = wallpaper_draft.clone();
+        main.on_remove_wallpaper(move || {
+            if let Some(ui) = weak.upgrade()
+                && available(&state.borrow())
+                && ui.get_settings_open()
+                && !ui.get_wallpaper_importing()
+                && ui.get_wallpaper_preview().size().width > 0
+            {
+                draft.borrow_mut().take();
+                ui.set_wallpaper_preview(slint::Image::default());
+                ui.set_wallpaper_transparency_choice(wallpaper::DEFAULT_TRANSPARENCY as f32);
+                ui.set_wallpaper_revision(ui.get_wallpaper_revision().wrapping_add(1));
+                state.borrow().clock.touch();
+            }
+        });
+    }
 
     for ui in [&main, &popup] {
         {
@@ -3255,9 +3403,40 @@ pub fn run() -> Result<(), String> {
             let popup_state = popup_state.clone();
             let native_sync = native.clone();
             let session_sync = session.clone();
+            let wallpaper_generation = wallpaper_generation.clone();
+            let wallpaper_jobs = jobs.clone();
             ui.on_session_changed(move || {
-                native_sync.set_unlocked(session_sync.borrow().vault.is_some());
+                let current = session_sync.borrow();
+                let unlocked = current.vault.is_some();
+                let generation = current.generation;
+                let root = if unlocked
+                    && wallpaper_generation.replace(Some(generation)) != Some(generation)
+                {
+                    Some(current.root.clone())
+                } else {
+                    None
+                };
+                drop(current);
+                native_sync.set_unlocked(unlocked);
                 if let (Some(main), Some(popup)) = (main_weak.upgrade(), popup_weak.upgrade()) {
+                    if let Some(root) = root {
+                        main.set_wallpaper_loading(true);
+                        let jobs = wallpaper_jobs.clone();
+                        std::thread::spawn(move || {
+                            jobs.send(JobResult::WallpaperLoaded(
+                                generation,
+                                wallpaper::load(&root),
+                            ));
+                        });
+                    } else if !unlocked && wallpaper_generation.take().is_some() {
+                        for window in [&main, &popup] {
+                            window.set_wallpaper_image(slint::Image::default());
+                            window
+                                .set_wallpaper_transparency(wallpaper::DEFAULT_TRANSPARENCY as f32);
+                        }
+                        main.set_wallpaper_loading(false);
+                        main.invoke_reset_wallpaper_draft();
+                    }
                     refresh(&main, &mut main_state.borrow_mut());
                     if popup.window().is_visible() {
                         refresh(&popup, &mut popup_state.borrow_mut());
@@ -3318,6 +3497,7 @@ pub fn run() -> Result<(), String> {
                         let mut state = state.borrow_mut();
                         cancel_auth(&ui, &mut state);
                         state.editor_verified = None;
+                        ui.invoke_reset_wallpaper_draft();
                         ui.set_settings_open(false);
                         ui.set_about_open(false);
                         ui.set_reset_master("".into());
@@ -3348,6 +3528,9 @@ pub fn run() -> Result<(), String> {
                 if let Some(popup) = popup_weak.upgrade() {
                     let _ = hide_window(&popup, Some(&popup_watch));
                 }
+                if let Some(main) = main_weak.upgrade() {
+                    main.invoke_session_changed();
+                }
             });
         }
         {
@@ -3376,11 +3559,8 @@ pub fn run() -> Result<(), String> {
                 }
                 let result = (|| {
                     let folder = settings::backup_dialog_directory(&session.borrow().root)?;
-                    let selected = platform::choose_backup_path(
-                        window_id(&ui)?,
-                        &folder,
-                        BackupDialog::Restore,
-                    )?;
+                    let selected =
+                        platform::choose_path(window_id(&ui)?, &folder, FileDialog::Restore)?;
                     if let Some(source) = selected {
                         session.borrow_mut().restore_copy(&source)?;
                         ui.invoke_lock_vault();
@@ -3430,7 +3610,7 @@ pub fn run() -> Result<(), String> {
             let result = (|| {
                 let folder = settings::backup_dialog_directory(&session.borrow().root)?;
                 if let Some(path) =
-                    platform::choose_backup_path(window_id(&ui)?, &folder, BackupDialog::Save)?
+                    platform::choose_path(window_id(&ui)?, &folder, FileDialog::Save)?
                 {
                     session
                         .borrow_mut()
@@ -3489,6 +3669,15 @@ pub fn run() -> Result<(), String> {
             }
             let resume = ui.get_reset_incomplete();
             if !resume && (!ui.get_reset_confirmed() || ui.get_reset_master().is_empty()) {
+                return;
+            }
+            if !resume
+                && let Some(message) = session
+                    .borrow()
+                    .master_attempts
+                    .retry_message(Instant::now())
+            {
+                ui.set_status(message.into());
                 return;
             }
             let master = Zeroizing::new(ui.get_reset_master().to_string());
@@ -3629,6 +3818,7 @@ pub fn run() -> Result<(), String> {
         let auto_update_pref = auto_update.clone();
         let save_update_ctrl = update_ctrl.clone();
         let save_jobs = jobs.clone();
+        let wallpaper_draft = wallpaper_draft.clone();
         ui.on_save_settings(move || {
             let Some(ui) = weak.upgrade() else {
                 return;
@@ -3637,6 +3827,7 @@ pub fn run() -> Result<(), String> {
                 || session.borrow().working
                 || session.borrow().auth_owner.is_some()
                 || ui.get_recording_shortcut()
+                || ui.get_wallpaper_importing()
             {
                 return;
             }
@@ -3646,6 +3837,11 @@ pub fn run() -> Result<(), String> {
             let protect_screen = ui.get_screen_protection_choice();
             let check_updates = ui.get_auto_update_choice();
             let backup_directory = ui.get_backup_directory_choice();
+            let new_transparency = (ui.get_wallpaper_transparency_choice().round() as i32)
+                .clamp(0, wallpaper::MAX_TRANSPARENCY);
+            let wallpaper_changed = ui.get_wallpaper_revision() != 0
+                || new_transparency != ui.get_wallpaper_transparency() as i32;
+            let wallpaper_preview = ui.get_wallpaper_preview();
             let was_auto_update = auto_update_pref.get();
             let result = (|| {
                 let shortcut = ui.get_shortcut_input().as_str().parse::<Shortcut>()?;
@@ -3658,7 +3854,10 @@ pub fn run() -> Result<(), String> {
                     _ => return Err("计时方式无效。".into()),
                 };
                 let settings = LockSettings { minutes, source };
-                let snapshot = windows_password_manager::settings::Snapshot::capture(&root)?;
+                let snapshot = windows_password_manager::settings::Snapshot::capture(
+                    &root,
+                    wallpaper_changed,
+                )?;
                 recorder.prepare_shortcut(shortcut)?;
                 let write = (|| {
                     shortcut.save(&root)?;
@@ -3671,6 +3870,14 @@ pub fn run() -> Result<(), String> {
                     )?;
                     windows_password_manager::settings::save_auto_update(&root, check_updates)?;
                     settings::save_backup_directory(&root, backup_directory.trim())?;
+                    if wallpaper_changed {
+                        wallpaper::save(
+                            &root,
+                            wallpaper_draft.borrow().as_deref(),
+                            wallpaper_preview.size().width == 0,
+                            new_transparency,
+                        )?;
+                    }
                     startup::save(&root, ui.get_start_at_logon(), ui.get_start_in_tray())
                 })();
                 if let Err(message) = write {
@@ -3693,13 +3900,17 @@ pub fn run() -> Result<(), String> {
                         window.set_appearance_mode(appearance);
                         window.set_screen_protection_choice(protect_screen);
                         window.set_auto_update_choice(check_updates);
+                        if wallpaper_changed {
+                            window.set_wallpaper_image(wallpaper_preview.clone());
+                            window.set_wallpaper_transparency(new_transparency as f32);
+                        }
                         window.invoke_apply_appearance();
                         // Hidden panels apply capture protection when shown.
                         if window.window().is_visible() {
                             if protection_changed && let Ok(hwnd) = window_id(&window) {
                                 platform::set_screen_protection(hwnd, protect_screen);
                             }
-                            if colors_changed || protection_changed {
+                            if colors_changed || protection_changed || wallpaper_changed {
                                 window.set_repaint_frame(!window.get_repaint_frame());
                                 window.window().request_redraw();
                             }
@@ -3721,6 +3932,7 @@ pub fn run() -> Result<(), String> {
             ui.invoke_session_changed();
             match result {
                 Ok(()) => {
+                    ui.invoke_reset_wallpaper_draft();
                     ui.invoke_mark_settings_saved();
                     success(&ui, "设置已保存。".into());
                 }
@@ -4062,8 +4274,49 @@ pub fn run() -> Result<(), String> {
             }
             while let Ok(job) = results.try_recv() {
                 match job {
+                    JobResult::WallpaperLoaded(generation, result) => {
+                        let current = session.borrow();
+                        if current.generation != generation || current.vault.is_none() {
+                            continue;
+                        }
+                        drop(current);
+                        main.set_wallpaper_loading(false);
+                        match result {
+                            Ok(Some((pixels, transparency))) => {
+                                let image = wallpaper::slint_image(pixels);
+                                for window in [&main, &popup] {
+                                    window.set_wallpaper_image(image.clone());
+                                    window.set_wallpaper_transparency(transparency as f32);
+                                }
+                                main.invoke_reset_wallpaper_draft();
+                            }
+                            Ok(None) => {}
+                            Err(message) => main.set_status(message.into()),
+                        }
+                    }
+                    JobResult::WallpaperImported(request, result) => {
+                        if wallpaper_serial.get() != request || session.borrow().vault.is_none() {
+                            continue;
+                        }
+                        main.set_wallpaper_importing(false);
+                        if !main.get_settings_open() {
+                            continue;
+                        }
+                        match result {
+                            Ok(asset) => {
+                                main.set_wallpaper_preview(wallpaper::slint_image(asset.pixels));
+                                *wallpaper_draft.borrow_mut() = Some(asset.png);
+                                main.set_wallpaper_revision(
+                                    main.get_wallpaper_revision().wrapping_add(1),
+                                );
+                                main.set_status("".into());
+                            }
+                            Err(message) => main.set_status(message.into()),
+                        }
+                    }
                     JobResult::Reset(result) => {
                         session.borrow_mut().working = false;
+                        let result = master_attempt_result(&mut session.borrow_mut(), result);
                         match result {
                             Ok(()) => {
                                 reset_restart.set(true);
@@ -4082,7 +4335,11 @@ pub fn run() -> Result<(), String> {
                             }
                         }
                     }
-                    JobResult::Backup { generation, result } => {
+                    JobResult::Backup {
+                        generation,
+                        current_vault_master,
+                        result,
+                    } => {
                         session.borrow_mut().working = false;
                         let current = session.borrow().generation == generation
                             && session.borrow().vault.is_some()
@@ -4096,6 +4353,11 @@ pub fn run() -> Result<(), String> {
                             main.invoke_session_changed();
                             continue;
                         }
+                        let result = if current_vault_master {
+                            master_attempt_result(&mut session.borrow_mut(), result)
+                        } else {
+                            result
+                        };
                         match result {
                             Ok(BackupOutcome::Restored(vault, path)) => {
                                 main.invoke_lock_vault();
@@ -4142,6 +4404,7 @@ pub fn run() -> Result<(), String> {
                     }
                     JobResult::Maintenance(result) => {
                         session.borrow_mut().working = false;
+                        let result = master_attempt_result(&mut session.borrow_mut(), result);
                         main.invoke_session_changed();
                         match result {
                             Ok(message) => success(&main, message),

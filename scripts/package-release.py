@@ -26,6 +26,7 @@ PAYLOAD = {
     'docs/preview.png': 'docs/preview.png',
     'docs/screenshots/quick-fill.png': 'docs/screenshots/quick-fill.png',
     'docs/screenshots/account-editor.png': 'docs/screenshots/account-editor.png',
+    'docs/screenshots/account-details.png': 'docs/screenshots/account-details.png',
     'docs/screenshots/verification.png': 'docs/screenshots/verification.png',
     'docs/screenshots/settings.png': 'docs/screenshots/settings.png',
     'docs/screenshots/backup-manager.png': 'docs/screenshots/backup-manager.png',

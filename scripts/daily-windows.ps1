@@ -131,15 +131,15 @@ try {
  Button '取消编辑'
  RightClick (Row 'Beta');Menu '删除账号'
  Assert (TextExists '2 个账号') 'Context delete bypassed confirmation'
- Assert (MatchText '再次点击确认删除「Beta」') 'Context delete targeted wrong account'
+ Assert (MatchText '确认删除账号「Beta」') 'Context delete targeted wrong account'
  Button '取消删除'
  RightClick (Row 'Beta');Menu '新增账号'
  Assert ((Edits)[0].GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value -eq '') 'Context new reused account fields'
  Button '取消编辑'
  SetEdit 0 'no-matching-account'
- $empty=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '没有匹配的账号，请调整关键词或筛选条件。')[0]
+ $empty=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '没有匹配的账号')[0]
  RightClick $empty;Menu '新增账号';Button '取消编辑';SetEdit 0 ''
- Button '新增账号';SetEdit 0 'Sensitive';SetEdit 1 'protected.user';SetEdit 2 'Sensitive-secret!2026';Toggle '敏感项：使用、查看和编辑前再次验证';Button '保存账号'
+ Button '新增账号';SetEdit 0 'Sensitive';SetEdit 1 'protected.user';SetEdit 2 'Sensitive-secret!2026';Toggle '敏感项：填充、查看、编辑和删除前验证';Button '保存账号'
  RightClick (Row '敏感 · Sensitive');Menu '编辑账号'
  Assert (TextExists '敏感项验证') 'Context edit bypassed sensitive verification'
  Button '密码库主密码';SetEdit 0 'wrong';Button '验证主密码';Pause 700
@@ -210,4 +210,10 @@ try {
  StopApp
  [DailyNative]::SetCursorPos($cursor.X,$cursor.Y) | Out-Null
  $env:PASSWORD_MANAGER_DATA_DIR=$previous
+}
+
+if (-not $LayoutOnly) {
+ & "$PSHOME\powershell.exe" -NoProfile -Sta -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'wallpaper-windows.ps1') `
+     -ExePath $ExePath -DataDir (Join-Path $DataDir 'wallpaper-regression')
+ Assert ($LASTEXITCODE -eq 0) 'Daily wallpaper regression failed'
 }

@@ -51,17 +51,23 @@ Application history is a sorting aid. Chrome websites currently share the browse
 
 ## Manage accounts and sensitive entries
 
-Store categories, tags, URLs, and notes alongside each account, with a built-in CSPRNG password generator in the editor so new passwords never need to pass through an external clipboard. Use the context menu, double-click, or `F2` to edit. `Alt+Enter` opens read-only details with the password masked by default and an optional protected copy action (excluded from Windows Clipboard History and auto-cleared after 15 seconds or on lock); viewing a sensitive entry does not authorize a later edit.
+Store categories, tags, URLs, and notes alongside each account. In the editor, choose an existing category or add an existing tag. The built-in random password generator offers 12, 16, or 20 characters and lets you choose whether to include symbols.
+
+Use the context menu, double-click, or `F2` to edit. `Alt+Enter` opens read-only details with the password masked by default. Protected copies stay out of Windows Clipboard History and clear after 15 seconds or when the vault locks. Editing a sensitive entry requires its own verification.
 
 Mark an entry as sensitive to require verification before viewing, editing, deleting, or filling it. Windows account password verification is the default; `Tab` switches to PIN / Windows Hello or the vault master password. Each approval is limited to the current action. Windows account passwords are collected by the system credentials dialog and are not stored in the vault.
 
-![Account editor with masked password, categories, tags, URL, and notes](docs/screenshots/account-editor.png)
+![Account editor with password length and symbol options, plus category and tag pickers](docs/screenshots/account-editor.png)
+
+![Account details grouped into sign-in credentials and organization, with the password masked](docs/screenshots/account-details.png)
 
 ![Sensitive-entry prompt offering Windows password, PIN or Hello, and vault master password](docs/screenshots/verification.png)
 
 ## Appearance, locking, and backups
 
 Choose system, light, or dark appearance with teal, blue, violet, or graphite accents, plus optional window screen-capture protection and automatic background update checks. Record a shortcut by pressing the keys you want, and save appearance, capture protection, shortcut, lock, startup, and update preferences together. The main window supports dragging and resizing and remembers its layout across restarts.
+
+In **Settings → Appearance**, choose a local PNG or JPEG to use as the background in account management and quick fill. Raise **Interface transparency** to show more of the image through the controls and list, then save. Keyisle keeps a local copy and uses a solid background for lock and verification screens.
 
 The default lock timeout is 5 minutes of computer inactivity. Both the timeout and idle basis are configurable. Windows session lock, sleep, and disconnection lock the vault and cancel pending consent or filling. Manual launch opens the main window; automatic startup can remain in the tray.
 

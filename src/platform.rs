@@ -1236,16 +1236,17 @@ pub fn idle_expired(clock: &windows_password_manager::security::LockClock) -> bo
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum BackupDialog {
+pub enum FileDialog {
     Save,
     Restore,
     Directory,
+    Wallpaper,
 }
 
-pub fn choose_backup_path(
+pub fn choose_path(
     owner: usize,
     initial: &std::path::Path,
-    mode: BackupDialog,
+    mode: FileDialog,
 ) -> Result<Option<std::path::PathBuf>, String> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows::{
@@ -1268,7 +1269,7 @@ pub fn choose_backup_path(
             .ok()
             .map_err(|_| "无法初始化 Windows 文件选择器。")?;
         let result = (|| -> windows::core::Result<_> {
-            let class = if mode == BackupDialog::Save {
+            let class = if mode == FileDialog::Save {
                 &FileSaveDialog
             } else {
                 &FileOpenDialog
@@ -1276,8 +1277,13 @@ pub fn choose_backup_path(
             let dialog: IFileDialog = CoCreateInstance(class, None, CLSCTX_INPROC_SERVER)?;
             let mut flags =
                 dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT;
-            if mode == BackupDialog::Directory {
+            if mode == FileDialog::Directory {
                 flags |= FOS_PICKFOLDERS;
+            } else if mode == FileDialog::Wallpaper {
+                dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+                    pszName: w!("PNG / JPEG 图片"),
+                    pszSpec: w!("*.png;*.jpg;*.jpeg"),
+                }])?;
             } else {
                 dialog.SetFileTypes(&[
                     COMDLG_FILTERSPEC {
@@ -1293,9 +1299,10 @@ pub fn choose_backup_path(
             }
             dialog.SetOptions(flags)?;
             dialog.SetTitle(match mode {
-                BackupDialog::Save => w!("保存加密备份（请选择新文件）"),
-                BackupDialog::Restore => w!("选择要恢复的加密备份"),
-                BackupDialog::Directory => w!("选择默认备份目录"),
+                FileDialog::Save => w!("保存加密备份（请选择新文件）"),
+                FileDialog::Restore => w!("选择要恢复的加密备份"),
+                FileDialog::Directory => w!("选择默认备份目录"),
+                FileDialog::Wallpaper => w!("选择背景图片"),
             })?;
             let path: Vec<_> = initial.as_os_str().encode_wide().chain([0]).collect();
             let folder: IShellItem = SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)?;
@@ -1313,7 +1320,7 @@ pub fn choose_backup_path(
             Ok(Some(selected))
         })();
         CoUninitialize();
-        result.map_err(|error| format!("无法选择备份路径（{}）。", error.code()))
+        result.map_err(|error| format!("无法打开文件选择器（{}）。", error.code()))
     }
 }
 

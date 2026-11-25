@@ -107,27 +107,61 @@ impl MasterAttempts {
     }
 }
 
-pub fn master_strength_hint(value: &str) -> &'static str {
+pub fn master_strength_hint(value: &str) -> (i32, &'static str) {
+    let length = value.chars().count();
     if value.is_empty() {
-        ""
-    } else if value.chars().count() < 10 {
-        "主密码至少需要 10 个字符。"
-    } else if value.chars().all(|c| c.is_ascii_digit())
-        || value.chars().all(|c| Some(c) == value.chars().next())
-        || ["password", "qwerty", "admin", "letmein"]
-            .iter()
-            .any(|pattern| {
-                value
-                    .get(..pattern.len())
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(pattern))
-            })
+        (0, "")
+    } else if length < 10 {
+        (1, "主密码至少需要 10 个字符。")
+    } else if value.bytes().all(|c| c.is_ascii_digit())
+        || fewer_than_five_distinct_chars(value)
+        || is_ascii_sequence(value)
+        || [
+            "password", "qwerty", "admin", "letmein", "keyisle", "123456",
+        ]
+        .iter()
+        .any(|pattern| {
+            value
+                .as_bytes()
+                .windows(pattern.len())
+                .any(|slice| slice.eq_ignore_ascii_case(pattern.as_bytes()))
+        })
     {
-        "这个主密码容易猜到，建议用多个互不相关的词。"
-    } else if value.chars().count() < 16 {
-        "更长的主密码更难猜，建议使用至少 16 个字符。"
+        (1, "这个主密码容易猜到，建议用多个互不相关的词。")
+    } else if length < 16 {
+        (2, "建议使用至少 16 个字符。")
     } else {
-        ""
+        (3, "主密码强度良好")
     }
+}
+
+fn fewer_than_five_distinct_chars(value: &str) -> bool {
+    let mut seen = ['\0'; 5];
+    let mut count = 0;
+    for character in value.chars().map(|c| c.to_ascii_lowercase()) {
+        if !seen[..count].contains(&character) {
+            seen[count] = character;
+            count += 1;
+            if count == seen.len() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn is_ascii_sequence(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let [first, second, ..] = bytes else {
+        return false;
+    };
+    let step = i16::from(second.to_ascii_lowercase()) - i16::from(first.to_ascii_lowercase());
+    step.abs() == 1
+        && bytes.windows(2).all(|pair| {
+            pair.iter().all(u8::is_ascii_alphabetic)
+                && i16::from(pair[1].to_ascii_lowercase()) - i16::from(pair[0].to_ascii_lowercase())
+                    == step
+        })
 }
 
 // Shared with the native timer so file dialogs cannot suspend idle locking.
@@ -305,10 +339,23 @@ mod tests {
         );
         attempts.accepted();
         assert!(attempts.rejected(now).is_none());
-        assert_eq!(master_strength_hint(""), "");
-        assert!(master_strength_hint("qWeRtY-Example").contains("容易猜到"));
-        assert!(master_strength_hint("1234567890123456").contains("容易猜到"));
-        assert_eq!(master_strength_hint("tree-delta-comet-plum"), "");
+        assert_eq!(master_strength_hint(""), (0, ""));
+        assert_eq!(master_strength_hint("abc").0, 1);
+        for weak in [
+            "qWeRtY-Example",
+            "中文开头-my-Password-7890",
+            "my-Keyisle-example",
+            "1234567890123456",
+            "1111122222333333",
+            "abcdefghij",
+            "ZYXWVUTSRQ",
+        ] {
+            let (level, hint) = master_strength_hint(weak);
+            assert_eq!(level, 1);
+            assert!(hint.contains("容易猜到"));
+        }
+        assert_eq!(master_strength_hint("tree-delta-plum").0, 2);
+        assert_eq!(master_strength_hint("tree-delta-comet-plum").0, 3);
     }
 
     #[test]

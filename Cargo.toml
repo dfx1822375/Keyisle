@@ -1,6 +1,6 @@
 [package]
 name = "windows-password-manager"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2024"
 rust-version = "1.92"
 publish = false
@@ -16,6 +16,7 @@ pinyin = { version = "=0.11.0", default-features = false, features = ["plain", "
 rusqlite = { version = "0.42", features = ["bundled-sqlcipher"] }
 
 [target.'cfg(windows)'.dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 password-manager-sqlcipher = { path = "native-sqlcipher" }
 slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "accessibility", "compat-1-2", "raw-window-handle-06", "unstable-winit-030"] }
 windows-future = "=0.3.2"

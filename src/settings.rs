@@ -1,10 +1,14 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 const BACKUP_DIRECTORY: &str = "backup-directory.txt";
-const FILES: [&str; 8] = [
+pub const WALLPAPER_FILE: &str = "wallpaper.bin";
+pub const WALLPAPER_TEMP: &str = "wallpaper.tmp";
+pub const WALLPAPER_LIMIT: u64 = 10 * 1024 * 1024;
+const FILES: [&str; 9] = [
     "shortcut.txt",
     "lock-settings.txt",
     "launch-settings.txt",
@@ -13,6 +17,7 @@ const FILES: [&str; 8] = [
     "screen-protection.txt",
     "auto-update.txt",
     BACKUP_DIRECTORY,
+    WALLPAPER_FILE,
 ];
 
 pub fn backup_directory(root: &Path) -> Result<PathBuf, String> {
@@ -130,21 +135,39 @@ pub fn save_auto_update(root: &Path, enabled: bool) -> Result<(), String> {
 
 pub struct Snapshot {
     root: PathBuf,
-    files: Vec<Option<Vec<u8>>>,
+    files: Vec<(&'static str, Option<Vec<u8>>)>,
 }
 impl Snapshot {
-    pub fn capture(root: &Path) -> Result<Self, String> {
+    pub fn capture(root: &Path, include_wallpaper: bool) -> Result<Self, String> {
         let mut files = Vec::new();
         for name in FILES {
+            if name == WALLPAPER_FILE && !include_wallpaper {
+                continue;
+            }
             let path = root.join(name);
-            match fs::metadata(&path) {
-                Ok(meta) if !meta.is_file() || meta.len() > 32768 => {
+            let limit = if name == WALLPAPER_FILE {
+                WALLPAPER_LIMIT
+            } else {
+                32768
+            };
+            let contents = match fs::symlink_metadata(&path) {
+                Ok(meta) if !meta.file_type().is_file() || meta.len() > limit => {
                     return Err("设置文件无效，未进行修改。".into());
                 }
-                Ok(_) => files.push(Some(fs::read(path).map_err(|_| "无法读取原设置。")?)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => files.push(None),
+                Ok(_) => {
+                    let mut bytes = Vec::new();
+                    fs::File::open(path)
+                        .and_then(|file| file.take(limit + 1).read_to_end(&mut bytes))
+                        .map_err(|_| "无法读取原设置。")?;
+                    if bytes.len() as u64 > limit {
+                        return Err("设置文件无效，未进行修改。".into());
+                    }
+                    Some(bytes)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(_) => return Err("无法读取原设置。".into()),
-            }
+            };
+            files.push((name, contents));
         }
         Ok(Self {
             root: root.to_owned(),
@@ -153,7 +176,7 @@ impl Snapshot {
     }
     pub fn restore(&self) -> Result<(), String> {
         let mut failed = false;
-        for (index, (name, contents)) in FILES.iter().zip(&self.files).enumerate() {
+        for (index, (name, contents)) in self.files.iter().enumerate() {
             let target = self.root.join(name);
             let result = if let Some(bytes) = contents {
                 let temp = self.root.join(format!("settings-rollback-{index}.tmp"));
@@ -178,7 +201,7 @@ fn rollback_preserves_exact_files_and_absent_defaults() {
     let root = std::env::temp_dir().join(format!("settings-snapshot-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
     fs::write(root.join(FILES[0]), b"Ctrl+Alt+P\n").unwrap();
-    let snapshot = Snapshot::capture(&root).unwrap();
+    let snapshot = Snapshot::capture(&root, true).unwrap();
     for name in FILES {
         fs::write(root.join(name), b"new").unwrap();
     }
@@ -186,7 +209,7 @@ fn rollback_preserves_exact_files_and_absent_defaults() {
     assert_eq!(fs::read(root.join(FILES[0])).unwrap(), b"Ctrl+Alt+P\n");
     assert!(FILES[1..].iter().all(|name| !root.join(name).exists()));
     fs::create_dir(root.join(FILES[1])).unwrap();
-    assert!(Snapshot::capture(&root).is_err());
+    assert!(Snapshot::capture(&root, true).is_err());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -205,20 +228,48 @@ fn themes_and_screen_protection_round_trip_and_roll_back() {
     save_auto_update(&root, false).unwrap();
     assert!(load_screen_protection(&root).unwrap());
     assert!(!load_auto_update(&root).unwrap());
-    let snapshot = Snapshot::capture(&root).unwrap();
+    let wallpaper = vec![0x7a; 64 * 1024];
+    fs::write(root.join(WALLPAPER_FILE), &wallpaper).unwrap();
+    let snapshot = Snapshot::capture(&root, true).unwrap();
     save_theme(&root, 1).unwrap();
     save_screen_protection(&root, false).unwrap();
     save_auto_update(&root, true).unwrap();
+    fs::remove_file(root.join(WALLPAPER_FILE)).unwrap();
     snapshot.restore().unwrap();
     assert_eq!(load_theme(&root).unwrap(), 3);
     assert!(load_screen_protection(&root).unwrap());
     assert!(!load_auto_update(&root).unwrap());
+    assert_eq!(fs::read(root.join(WALLPAPER_FILE)).unwrap(), wallpaper);
+    let snapshot = Snapshot::capture(&root, false).unwrap();
+    fs::write(root.join(WALLPAPER_FILE), b"new wallpaper").unwrap();
+    snapshot.restore().unwrap();
+    assert_eq!(
+        fs::read(root.join(WALLPAPER_FILE)).unwrap(),
+        b"new wallpaper"
+    );
     assert!(save_theme(&root, 4).is_err());
     assert_eq!(load_theme(&root).unwrap(), 3);
     fs::write(root.join("theme.txt"), "unknown").unwrap();
     assert!(load_theme(&root).is_err());
     fs::write(root.join("auto-update.txt"), "unknown").unwrap();
     assert!(load_auto_update(&root).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn snapshot_rejects_wallpaper_symlinks_only_when_needed() {
+    let root = std::env::temp_dir().join(format!("wallpaper-link-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("image"), b"image").unwrap();
+    std::os::unix::fs::symlink(root.join("image"), root.join(WALLPAPER_FILE)).unwrap();
+    assert!(Snapshot::capture(&root, true).is_err());
+    Snapshot::capture(&root, false).unwrap().restore().unwrap();
+    assert!(
+        fs::symlink_metadata(root.join(WALLPAPER_FILE))
+            .unwrap()
+            .is_symlink()
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

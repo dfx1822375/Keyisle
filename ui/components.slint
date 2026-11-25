@@ -1,9 +1,10 @@
-import { LineEdit } from "std-widgets.slint";
+import { ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
 
 export global Theme {
     in-out property <int> scheme;
     in-out property <bool> dark;
-    out property <color> canvas: dark ? #131820 : #f3f6f8;
+    pure public function canvas-for(is-dark: bool) -> color { return is-dark ? #131820 : #f3f6f8; }
+    out property <color> canvas: Theme.canvas-for(dark);
     out property <color> repaint-canvas: dark ? #131821 : #f3f6f9;
     out property <length> window-radius: 12px;
     out property <length> control-height: 36px;
@@ -52,6 +53,36 @@ export component SectionCard inherits Rectangle {
     @children
 }
 
+export component FormScrollView inherits ScrollView {
+    private property <bool> scrollable: root.content-height > root.visible-height;
+    out property <length> scrollbar-gutter;
+    // Measure after layout since the gutter itself can change where text wraps.
+    function update-gutter() { root.scrollbar-gutter = root.scrollable ? 16px : 0px; }
+    init => { root.update-gutter(); }
+    changed scrollable => { root.update-gutter(); }
+}
+
+export struct StrengthHint { level: int, message: string }
+
+export component StrengthMeter inherits HorizontalLayout {
+    in property <StrengthHint> hint;
+    private property <color> tone: root.hint.level == 3 ? Theme.success : Theme.warning;
+    height: 24px;
+    spacing: 8px;
+    HorizontalLayout {
+        width: 58px; spacing: 4px;
+        for segment in 3: Rectangle {
+            height: 4px; y: (parent.height - self.height) / 2;
+            border-radius: 2px;
+            background: segment < root.hint.level ? root.tone : Theme.line;
+        }
+    }
+    Text {
+        text: root.hint.message; color: root.tone; font-size: 11.5px; font-weight: 600;
+        vertical-alignment: center; wrap: word-wrap;
+    }
+}
+
 export component PageHeading inherits VerticalLayout {
     in property <string> title;
     in property <string> description;
@@ -60,24 +91,49 @@ export component PageHeading inherits VerticalLayout {
     if root.description != "": Text { text: root.description; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
 }
 
-export component KeyHint inherits HorizontalLayout {
+export component ListCaption inherits Rectangle {
+    in property <string> text;
+    in property <color> text-color: Theme.muted;
+    private property <length> inset: root.background.alpha > 0 ? 7px : 0px;
+    min-width: caption.preferred-width + 2 * root.inset;
+    height: 22px;
+    horizontal-stretch: 0;
+    border-radius: 5px;
+    caption := Text {
+        x: root.inset; width: parent.width - 2 * root.inset; height: parent.height;
+        text: root.text; color: root.text-color; font-size: 12px; font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+export component KeyHint inherits Rectangle {
     in property <string> keys;
     in property <string> action;
-    spacing: 5px;
+    in property <color> action-color: Theme.muted;
+    in property <float> fill-alpha: 1;
+    min-width: hint.preferred-width;
+    height: 22px;
     horizontal-stretch: 0;
-    Rectangle {
-        width: shortcut.preferred-width + 12px;
-        height: 21px;
-        border-radius: 5px;
-        border-width: 1px;
-        border-color: Theme.line;
-        background: Theme.canvas;
-        shortcut := Text {
-            text: root.keys; font-family: "Consolas"; font-size: 11px; font-weight: 600; color: Theme.ink;
-            horizontal-alignment: center; vertical-alignment: center;
+    border-radius: 5px;
+    background: root.fill-alpha < 1 ? Theme.surface.with-alpha(root.fill-alpha) : transparent;
+    hint := HorizontalLayout {
+        padding-right: root.fill-alpha < 1 ? 6px : 0px;
+        spacing: 5px;
+        Rectangle {
+            width: shortcut.preferred-width + 12px;
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: Theme.line;
+            background: Theme.canvas;
+            shortcut := Text {
+                text: root.keys; font-family: "Consolas"; font-size: 12px; font-weight: 600; color: Theme.ink;
+                horizontal-alignment: center; vertical-alignment: center;
+            }
+        }
+        if root.action != "": Text {
+            text: root.action; font-size: 12px; font-weight: 600; color: root.action-color; vertical-alignment: center;
         }
     }
-    if root.action != "": Text { text: root.action; font-size: 11px; color: Theme.muted; vertical-alignment: center; }
 }
 
 export component SensitiveBadge inherits Rectangle {
@@ -142,13 +198,16 @@ export component Button inherits Rectangle {
     in property <bool> menu;
     in property <bool> enabled: true;
     in property <length> label-padding: 14px;
+    in property <length> label-font-size: 13px;
+    in property <bool> muted-label;
+    in property <float> fill-alpha: 1;
     callback clicked();
     callback entered();
     out property <bool> focused: focus-scope.has-focus;
     out property <bool> hovered: pointer.has-hover;
     private property <bool> key-held;
     private property <bool> has-icon: root.icon.width > 0 && !root.menu;
-    private property <color> fg: !root.enabled ? Theme.muted : root.primary ? (root.danger ? Theme.on-danger : Theme.on-brand) : root.danger ? Theme.danger : Theme.ink;
+    private property <color> fg: !root.enabled ? Theme.muted : root.primary ? (root.danger ? Theme.on-danger : Theme.on-brand) : root.danger ? Theme.danger : root.muted-label ? Theme.muted : Theme.ink;
     forward-focus: focus-scope;
     min-width: root.text == "" ? 36px : max(64px, label.preferred-width + (root.has-icon ? 20px : 0px) + root.label-padding * 2);
     height: menu ? 30px : Theme.control-height;
@@ -157,7 +216,8 @@ export component Button inherits Rectangle {
     border-radius: menu ? 6px : Theme.control-radius;
     border-width: focus-scope.has-focus && enabled ? 1.5px : 1px;
     border-color: !enabled ? Theme.line-subtle : focus-scope.has-focus ? (danger ? Theme.danger : Theme.brand) : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected ? (danger ? Theme.danger-line : Theme.selection-line) : pointer.has-hover ? (danger ? Theme.danger-line : subtle || menu ? transparent : Theme.selection-line) : subtle || menu ? transparent : danger ? Theme.danger-line : Theme.line;
-    background: !enabled ? Theme.surface-muted : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected || pointer.has-hover ? (danger ? Theme.danger-soft : subtle && !selected ? Theme.hover : Theme.selection) : subtle || menu ? transparent : Theme.surface;
+    private property <color> fill: !enabled ? Theme.surface-muted : primary ? (danger ? Theme.danger : pointer.has-hover ? Theme.brand-hover : Theme.brand) : selected || pointer.has-hover ? (danger ? Theme.danger-soft : subtle && !selected ? Theme.hover : Theme.selection) : subtle || menu ? transparent : Theme.surface;
+    background: self.fill.transparentize(1 - (root.primary ? max(0.86, root.fill-alpha) : root.fill-alpha));
     opacity: pointer.pressed && enabled ? 0.85 : 1;
     accessible-role: button;
     accessible-label: root.text;
@@ -178,7 +238,7 @@ export component Button inherits Rectangle {
         }
         label := Text {
             text: root.text;
-            font-size: 13px;
+            font-size: root.label-font-size;
             font-weight: root.primary || root.selected ? 600 : 400;
             color: root.fg;
             horizontal-alignment: root.menu ? left : center;
@@ -204,6 +264,193 @@ export component Button inherits Rectangle {
             mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
             changed has-hover => { if (self.has-hover && root.enabled) { root.entered(); } }
             clicked => { focus-scope.focus(); root.clicked(); }
+        }
+    }
+}
+
+export component SearchField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <bool> enabled: true;
+    in property <float> fill-alpha: 1;
+    in property <string> label;
+    callback edited();
+    callback accepted();
+    callback key-pressed(KeyEvent) -> EventResult;
+    private property <bool> translucent: root.fill-alpha < 1;
+    public function focus-input() {
+        if (root.translucent) { photo-input.focus(); }
+        else { native-input.focus(); }
+    }
+
+    native-input := LineEdit {
+        width: parent.width; height: parent.height;
+        visible: !root.translucent;
+        enabled: self.visible && root.enabled;
+        text <=> root.text; placeholder-text: root.placeholder-text;
+        accessible-label: root.label;
+        edited => { root.edited(); }
+        accepted => { root.accepted(); }
+        key-pressed(event) => { root.key-pressed(event) }
+    }
+    Rectangle {
+        visible: root.translucent;
+        border-radius: 4px; border-width: 1px; border-color: Theme.line;
+        background: Theme.surface.with-alpha(root.fill-alpha);
+        TouchArea {
+            enabled: root.translucent && root.enabled;
+            mouse-cursor: MouseCursor.text;
+            clicked => { photo-input.focus(); }
+        }
+        viewport := Rectangle {
+            x: 12px; width: parent.width - 24px - (clear-button.visible ? clear-button.width : 0px);
+            height: parent.height; clip: true;
+            Text {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                visible: root.text == "" && photo-input.preedit-text == "";
+                text: root.placeholder-text; color: Theme.text; vertical-alignment: center; horizontal-alignment: left;
+                accessible-role: none;
+            }
+            ContextMenuArea {
+                enabled: root.enabled;
+                Menu {
+                    MenuItem { title: "撤销"; activated => { photo-input.undo(); } }
+                    MenuItem { title: "重做"; activated => { photo-input.redo(); } }
+                    MenuSeparator {}
+                    MenuItem { title: "剪切"; enabled: root.text != ""; activated => { photo-input.cut(); } }
+                    MenuItem { title: "复制"; enabled: root.text != ""; activated => { photo-input.copy(); } }
+                    MenuItem { title: "粘贴"; activated => { photo-input.paste(); } }
+                    MenuItem { title: "全选"; activated => { photo-input.select-all(); } }
+                }
+                photo-input := TextInput {
+                    property <length> scroll-x;
+                    x: clamp(self.scroll-x, min(0px, viewport.width - self.width), 0px);
+                    width: max(viewport.width, self.preferred-width + 2px);
+                    height: viewport.height;
+                    enabled: root.translucent && root.enabled;
+                    text <=> root.text;
+                    changed text => { if (self.text == "") { self.scroll-x = 0px; } }
+                    single-line: true;
+                    color: Theme.ink;
+                    selection-background-color: Palette.selection-background;
+                    selection-foreground-color: Palette.selection-foreground;
+                    vertical-alignment: center;
+                    accessible-label: root.label;
+                    accessible-placeholder-text: root.placeholder-text;
+                    accessible-action-set-value(value) => { if (self.enabled) { self.text = value; root.edited(); } }
+                    cursor-position-changed(position) => {
+                        if (position.x + self.x < 0px) { self.scroll-x = -position.x; }
+                        else if (position.x + self.x > viewport.width - 2px) { self.scroll-x = viewport.width - position.x - 2px; }
+                    }
+                    edited => { root.edited(); }
+                    accepted => { root.accepted(); }
+                    key-pressed(event) => { root.key-pressed(event) }
+                }
+            }
+        }
+        clear-button := Button {
+            visible: root.enabled && (photo-input.has-focus || self.focused) && root.text != "";
+            x: parent.width - self.width - 5px; y: (parent.height - self.height) / 2;
+            width: 24px; height: 24px; label-padding: 4px;
+            text: "×"; label-font-size: 18px;
+            accessible-label: "清除搜索";
+            subtle: true;
+            clicked => { root.text = ""; root.edited(); photo-input.focus(); }
+        }
+        if photo-input.has-focus: Rectangle {
+            x: 4px; width: parent.width - 8px; y: parent.height - 2px; height: 2px;
+            border-radius: 1px; background: Theme.brand;
+        }
+    }
+}
+
+export component FilterComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <bool> enabled: true;
+    in-out property <int> current-index;
+    in property <float> fill-alpha: 1;
+    in property <string> label;
+    callback selected(string);
+    private property <bool> translucent: root.fill-alpha < 1;
+    forward-focus: native;
+    native := ComboBox {
+        width: parent.width; height: parent.height;
+        model: root.model;
+        enabled: root.enabled;
+        current-index <=> root.current-index;
+        accessible-label: root.label;
+        opacity: root.translucent ? 0 : 1;
+        selected(value) => { root.selected(value); }
+    }
+    if root.translucent: Rectangle {
+        border-radius: 4px;
+        border-width: 1px; border-color: Theme.line;
+        background: (hover-area.has-hover ? Theme.hover : Theme.surface).with-alpha(root.fill-alpha);
+        accessible-role: none;
+        if native.has-focus: Rectangle {
+            x: 4px; width: parent.width - 8px; y: parent.height - 2px; height: 2px;
+            border-radius: 1px; background: Theme.brand;
+        }
+        Text {
+            x: 11px; width: parent.width - 39px; height: parent.height;
+            text: native.current-value; color: root.enabled ? Theme.ink : Theme.muted;
+            horizontal-alignment: left; vertical-alignment: center; overflow: elide; accessible-role: none;
+        }
+        Path {
+            x: parent.width - 22px; y: (parent.height - self.height) / 2;
+            width: 10px; height: 8px; viewbox-width: 10; viewbox-height: 8;
+            commands: "M1 2 L5 6 L9 2";
+            stroke: root.enabled ? Theme.ink : Theme.muted; stroke-width: 1.4px;
+            accessible-role: none;
+        }
+        hover-area := TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { native.focus(); native.accessible-action-expand(); }
+        }
+    }
+}
+
+export component ListEmpty inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> description;
+    in property <string> action;
+    in property <bool> action-enabled: true;
+    in property <color> backing: transparent;
+    callback activated();
+    if root.backing.alpha > 0: Rectangle {
+        width: min(parent.width - 24px, 390px);
+        height: empty-content.preferred-height;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        border-radius: 10px; background: root.backing;
+        accessible-role: none;
+    }
+    empty-content := VerticalLayout {
+        padding: 12px; spacing: 8px; alignment: center;
+        HorizontalLayout {
+            alignment: center;
+            Rectangle {
+                width: 40px; height: 40px;
+                border-radius: 10px; background: Theme.surface-muted;
+                accessible-role: none;
+                Image {
+                    width: 18px; height: 18px;
+                    source: root.icon; colorize: Theme.muted;
+                }
+            }
+        }
+        Text {
+            text: root.title; color: Theme.ink; font-size: 14px; font-weight: 600;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.description; color: Theme.muted; font-size: 12px;
+            horizontal-alignment: center; wrap: word-wrap;
+        }
+        if root.action != "": HorizontalLayout {
+            alignment: center;
+            Button { text: root.action; subtle: true; enabled: root.action-enabled; clicked => { root.activated(); } }
         }
     }
 }
@@ -252,6 +499,7 @@ export component SecretField inherits Rectangle {
 }
 
 export component WindowControl inherits Rectangle {
+    in property <color> resting-background: transparent;
     in property <int> kind;
     in property <bool> maximized;
     in property <bool> nc-hovered;
@@ -263,7 +511,7 @@ export component WindowControl inherits Rectangle {
     width: 36px;
     height: 30px;
     border-radius: 6px;
-    background: !root.active-hover ? transparent : root.kind == 2 ? Theme.close-hover : Theme.hover;
+    background: !root.active-hover ? root.resting-background : root.kind == 2 ? Theme.close-hover : Theme.hover;
     opacity: pointer.pressed && root.enabled ? 0.82 : 1;
     accessible-role: button;
     accessible-label: root.label;

@@ -10,6 +10,7 @@ using System;
 using System.Runtime.InteropServices;
 public static class BatchTestNative {
  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+ [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr window);
 }
 '@
 [BatchTestNative]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null
@@ -31,8 +32,19 @@ function CheckBox([string]$prefix) {
  return $box
 }
 function Check([string]$prefix) {
- (CheckBox $prefix).GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+ $box=CheckBox $prefix
+ if ($prefix.StartsWith('选择账号 ')) {
+  $scale=[BatchTestNative]::GetDpiForWindow([IntPtr](Main).Current.NativeWindowHandle)/96.0
+  Assert ([Math]::Abs($box.Current.BoundingRectangle.Height-24*$scale) -le 2) 'Account checkbox focus area is taller than its intended target'
+ }
+ $box.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
  Pause 190
+}
+function AssertRightMargin($control,[int]$margin) {
+ $window=(Main).Current
+ $scale=[BatchTestNative]::GetDpiForWindow([IntPtr]$window.NativeWindowHandle)/96.0
+ Assert ($null -ne $control) 'Missing form control to measure'
+ Assert ($window.BoundingRectangle.Right-$control.Current.BoundingRectangle.Right -ge $margin*$scale-2) 'Form control overlaps the scrollbar gutter'
 }
 function Backups {
  Get-ChildItem -LiteralPath (Join-Path $DataDir 'backups') -Filter 'auto-*.db' -ErrorAction SilentlyContinue |
@@ -93,8 +105,14 @@ $backdrop.BackColor=[Drawing.Color]::FromArgb(236,241,244)
 $receiver=[Windows.Forms.TextBox]::new()
 $receiver.SetBounds(20,20,220,30)
 $backdrop.Controls.Add($receiver)
+$demoBackupDirectory=$null
 try {
  if ($CaptureScreenshots) {
+  $example=Join-Path ([IO.Path]::GetPathRoot($DataDir)) 'Keyisle Demo Backups'
+  Assert (!(Test-Path -LiteralPath $example)) 'The documentation backup directory already exists'
+  New-Item -ItemType Directory -Path $example | Out-Null
+  $demoBackupDirectory=$example
+  [IO.File]::WriteAllText((Join-Path $DataDir 'backup-directory.txt'),$demoBackupDirectory)
   $backdrop.Show()
  }
  StartApp
@@ -107,13 +125,18 @@ try {
   Button '新增账号'
   SetEdit 0 $item[0]; SetEdit 1 $item[1]; SetEdit 2 'Synthetic-Only!2026'
   SetEdit 3 $item[2]; SetEdit 4 $item[3]
-  if ($item[0] -eq '企业邮箱') {Capture 'account-editor.png'}
   if ($item[0] -eq '设备管理') {Check '敏感项'}
   Button '保存账号'
  }
  Assert (@(Backups).Count -eq 0) 'Creating accounts unexpectedly wrote an automatic backup'
  for ($i=0;$i -lt 3;$i++) {
-  SetEdit 0 '企业邮箱'; Button '编辑账号'; SetEdit 1 "mail.example$($i+1)"; Button '保存账号'
+  SetEdit 0 '企业邮箱'; Button '编辑账号'
+  if ($i -eq 0 -and $CaptureScreenshots) {
+   AssertRightMargin (@(Edits)[0]) 32
+   Capture 'account-editor.png'
+  }
+  $user=if($i -eq 2){'mail.example'}else{"mail.example$($i+1)"}
+  SetEdit 1 $user; Button '保存账号'
  }
  $originalBackups=@(Backups)
  Assert ($originalBackups.Count -eq 3) 'Editing existing accounts should create automatic backups'
@@ -121,7 +144,20 @@ try {
  Copy-Item -LiteralPath (Join-Path $DataDir 'vault.db') -Destination $external
  SetEdit 0 ''
  if ($CaptureScreenshots) {Pause 4200; Capture 'preview.png'}
- Button '设置'; Capture 'settings.png'; Button '返回账号列表'
+ if ($CaptureScreenshots) {
+  SetEdit 0 '设备管理'; Button '查看详情'
+  Button '密码库主密码'; SetEdit 0 $master; Button '验证主密码' 1400
+  Capture 'account-details.png'
+  Button '返回账号列表'; SetEdit 0 ''
+ }
+ Button '设置'
+ if ($CaptureScreenshots) {
+  $colorPicker=@(Visible (Main) $nameProperty '外观配色' |
+      Where-Object {$_.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox})[0]
+  AssertRightMargin $colorPicker 42
+  Capture 'settings.png'
+ }
+ Button '返回账号列表'
  CapturePopup
 
  Button '批量选择'; Check '选择账号 工作 VPN'; Check '选择账号 读书清单'
@@ -159,11 +195,32 @@ try {
   Pause 190
  }
  Assert (TextExists '已选 2 份备份') 'Backup selection count mismatch'
+ $backupBox=CheckBox '选择备份'
+ $scale=[BatchTestNative]::GetDpiForWindow([IntPtr](Main).Current.NativeWindowHandle)/96.0
+ Assert ([Math]::Abs($backupBox.Current.BoundingRectangle.Height-24*$scale) -le 2) 'Backup checkbox focus area is taller than its intended target'
  Capture 'backup-manager.png'
  Button '删除选中备份'; Button '取消备份操作'
  Assert (@(Backups).Count -eq 3) 'Cancel removed backups'
- Button '删除选中备份'; SetEdit 0 'Wrong-Only!2026'; Button '确认删除所选备份' 1400
- Assert (@(Backups).Count -eq 3) 'Wrong master password removed backups'
+ for ($attempt=0;$attempt -lt 5;$attempt++) {
+  Button '删除选中备份'; SetEdit 0 'Wrong-Only!2026'; Button '确认删除所选备份' 1200
+  Assert (@(Backups).Count -eq 3) 'Wrong master password removed backups'
+ }
+ Assert (@(Visible (Main) $controlType ([Windows.Automation.ControlType]::Text) |
+     Where-Object {$_.Current.Name -like '*多次验证失败*'}).Count -gt 0) 'Backup deletion did not start shared cooldown'
+ Button '删除选中备份'; SetEdit 0 $master; Button '确认删除所选备份'
+ Assert (@(Backups).Count -eq 3) 'Cooldown allowed immediate backup deletion'
+ Button '取消备份操作'; Button '返回账号列表'; Button '锁定'
+ SetEdit 0 $master; Button '解锁'
+ Assert (TextExists '解锁密码库') 'Locking escaped the backup deletion cooldown'
+ Pause 5100
+ Unlock $master
+ Button '备份管理'; Button '批量选择'
+ foreach($name in @($originalBackups[0],$originalBackups[2])) {
+  $box=@(Visible (Main) $controlType ([Windows.Automation.ControlType]::CheckBox) |
+      Where-Object {$_.Current.Name.EndsWith($name)})[0]
+  Assert ($null -ne $box) "Backup checkbox missing after unlock: $name"
+  $box.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle(); Pause 190
+ }
  Button '删除选中备份'; SetEdit 0 $master; Button '确认删除所选备份' 1400
  Assert (((Backups) -join '|') -eq $originalBackups[1]) 'Batch backup deletion did not match the exact selection'
  Assert ((Test-Path -LiteralPath $external) -and (Test-Path -LiteralPath (Join-Path $DataDir 'vault.db'))) 'Batch modified a vault or external export'
@@ -174,4 +231,5 @@ try {
  if ($script:process -and !$script:process.HasExited) {StopApp}
  $backdrop.Dispose()
  $env:PASSWORD_MANAGER_DATA_DIR=$oldDataDir
+ if ($demoBackupDirectory) {[IO.Directory]::Delete($demoBackupDirectory)}
 }

@@ -7,6 +7,8 @@ mod platform;
 #[cfg(windows)]
 mod recording;
 #[cfg(windows)]
+mod wallpaper;
+#[cfg(windows)]
 mod windows_auth;
 
 #[cfg(windows)]

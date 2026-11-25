@@ -108,7 +108,7 @@ function StartApp([switch]$NoFocus) {
  }
 }
 function StopApp {
- foreach ($title in @('保存加密备份（请选择新文件）','选择要恢复的加密备份')) {
+ foreach ($title in @('保存加密备份（请选择新文件）','选择要恢复的加密备份','选择背景图片')) {
   $dialog = [VaultTestNative]::FindWindow('#32770',$title)
   if ($dialog -ne [IntPtr]::Zero -and [Windows.Automation.AutomationElement]::FromHandle($dialog).Current.ProcessId -eq $script:process.Id) { [VaultTestNative]::PostMessage($dialog,0x10,[IntPtr]::Zero,[IntPtr]::Zero) | Out-Null }
  }

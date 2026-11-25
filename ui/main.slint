@@ -1,6 +1,8 @@
-import { LineEdit, ComboBox, ScrollView, TextEdit, CheckBox, Palette, AboutSlint } from "std-widgets.slint";
+import { LineEdit, ComboBox, ScrollView, TextEdit, CheckBox, Slider, Palette, AboutSlint } from "std-widgets.slint";
 
-import { Theme, Surface, SectionCard, PageHeading, KeyHint, SensitiveBadge, StatusBanner, Button, SecretField, BrandMark, WindowControl } from "components.slint";
+import { Theme, Surface, SectionCard, PageHeading, ListCaption, KeyHint, SensitiveBadge, StatusBanner, Button, SecretField, BrandMark, WindowControl, StrengthHint, StrengthMeter, ListEmpty, FormScrollView, SearchField, FilterComboBox } from "components.slint";
+
+export { StrengthHint }
 
 export enum FillAction { password, username, both }
 
@@ -23,7 +25,13 @@ export struct TargetDetail { prefix: string, coordinates: string, suffix: string
 export component AppWindow inherits Window {
     in property <bool> compact;
     out property <string> match-color: Theme.match-color;
-    public function apply-appearance() { Theme.dark = root.effective-dark; Palette.color-scheme = root.effective-dark ? ColorScheme.dark : ColorScheme.light; }
+    callback apply-fluent-accent(color);
+    public function apply-appearance() {
+        Theme.scheme = root.theme-index;
+        Theme.dark = root.effective-dark;
+        Palette.color-scheme = root.effective-dark ? ColorScheme.dark : ColorScheme.light;
+        root.apply-fluent-accent(Theme.brand);
+    }
     init => { root.apply-appearance(); }
     in-out property <int> appearance-mode;
     in-out property <int> appearance-choice;
@@ -41,7 +49,28 @@ export component AppWindow inherits Window {
     callback system-menu();
     in-out property <int> theme-index;
     in-out property <int> theme-choice;
-    changed theme-index => { Theme.scheme = root.theme-index; }
+    changed theme-index => { root.apply-appearance(); }
+    in property <image> wallpaper-image;
+    in property <float> wallpaper-transparency;
+    in property <float> wallpaper-max-transparency;
+    in property <image> wallpaper-preview;
+    in property <bool> wallpaper-loading;
+    in property <bool> wallpaper-importing;
+    in-out property <float> wallpaper-transparency-choice;
+    in-out property <int> wallpaper-revision;
+    private property <bool> has-wallpaper: root.wallpaper-image.width > 0 && root.wallpaper-transparency > 0;
+    private property <bool> accounts-visible: root.unlocked && !root.details-open && !root.editing && !root.verification-active
+        && !root.settings-open && !root.maintenance-open && !root.backups-open && !root.about-open && !root.reset-open;
+    private property <float> wallpaper-amount: root.has-wallpaper ? root.wallpaper-transparency / 100 : 0;
+    private property <float> wallpaper-control-fill: 1 - root.wallpaper-amount * 0.4;
+    private property <float> wallpaper-text-fill: 1 - root.wallpaper-amount * 0.1;
+    private property <color> wallpaper-caption-fill: root.has-wallpaper ? Theme.surface.with-alpha(root.wallpaper-text-fill) : transparent;
+    private property <color> wallpaper-preview-canvas: Theme.canvas-for(root.appearance-choice == 2 || (root.appearance-choice == 0 && root.system-dark));
+    private property <color> list-label-color: root.has-wallpaper ? Theme.ink : Theme.muted;
+    private property <color> wallpaper-outline: Theme.canvas.with-alpha(clamp((root.wallpaper-amount - 0.4) * 2, 0, 0.96));
+    callback choose-wallpaper();
+    callback remove-wallpaper();
+    callback reset-wallpaper-draft();
     in-out property <int> secret-serial;
     in-out property <bool> max-hovered;
     in-out property <string> success-status;
@@ -49,6 +78,8 @@ export component AppWindow inherits Window {
     out property <bool> status-success: root.status != "" && root.status == root.success-status;
     in-out property <bool> app-menu-open;
     private property <int> app-menu-index;
+    private property <length> app-menu-right;
+    private property <length> app-menu-top;
     callback manage-context(int);
     in-out property <length> desktop-width: 820px;
     in-out property <length> desktop-height: 620px;
@@ -68,6 +99,7 @@ export component AppWindow inherits Window {
     in property <length> list-width-basis: 820px;
     private property <bool> wide-list: !root.compact && root.list-width-basis >= 720px;
     out property <length> row-height: root.compact ? 52px : root.wide-list ? 52px : 60px;
+    private property <length> backup-row-height: 64px;
     out property <length> row-stride: root.row-height + (root.compact ? 4px : 0px);
     private property <length> popup-results-height: min(5, max(1, root.entries.length)) * root.row-stride;
     // Keep a status slot so starting a fill never resizes or reactivates the popup.
@@ -86,6 +118,11 @@ export component AppWindow inherits Window {
     in property <[EntryRow]> entries;
     in-out property <int> selected: 0;
     in-out property <string> query;
+    private property <bool> has-filters: root.query != "" || root.category != "" || root.tag != "";
+    function clear-filters() {
+        root.query = ""; root.category = ""; root.tag = "";
+        root.search-changed(); root.focus-search();
+    }
     in-out property <string> category;
     in-out property <string> tag;
     in-out property <int> category-index;
@@ -141,7 +178,8 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-open;
     out property <bool> settings-visible: root.unlocked && root.settings-open && !root.verification-active
         && !root.maintenance-open && !root.backups-open && !root.reset-open && !root.about-open;
-    out property <bool> settings-dirty: root.settings-draft != root.settings-saved;
+    out property <bool> settings-dirty: root.settings-draft != root.settings-saved || root.wallpaper-revision != 0
+        || Math.round(root.wallpaper-transparency-choice) != root.wallpaper-transparency;
     callback close-settings();
     private property <string> settings-saved;
     private property <string> settings-draft: root.appearance-choice + "|" + root.theme-choice + "|"
@@ -268,6 +306,8 @@ export component AppWindow inherits Window {
     in-out property <string> edit-user;
     in-out property <string> edit-password;
     in-out property <string> edit-category;
+    in-out property <int> edit-category-choice;
+    in-out property <int> edit-tag-choice;
     in-out property <string> edit-tags;
     in-out property <string> edit-url;
     in-out property <string> edit-notes;
@@ -301,13 +341,12 @@ export component AppWindow inherits Window {
     callback open-release-page();
     in-out property <bool> details-open;
     in-out property <string> details-title;
+    in-out property <bool> details-sensitive;
     in-out property <string> details-user;
     in-out property <string> details-password;
     in property <bool> details-has-password;
     callback reveal-details-password(bool);
-    pure callback master-strength-hint(string) -> string;
-    private property <string> create-strength: root.new-vault ? root.master-strength-hint(root.master) : "";
-    private property <string> new-master-strength: root.master-strength-hint(root.new-master);
+    pure callback master-strength-hint(string) -> StrengthHint;
     in-out property <string> details-category;
     in-out property <string> details-tags;
     in-out property <string> details-url;
@@ -341,7 +380,7 @@ export component AppWindow inherits Window {
         } else if (!root.compact && (root.reset-open || root.backups-open || root.maintenance-open
             || root.editing || root.settings-visible || root.about-open || root.details-open)) {
             root.main-focus-serial += 1;
-        } else if (root.unlocked) { search.focus(); }
+        } else if (root.unlocked) { search.focus-input(); }
         else { master-input.focus(); }
     }
     forward-focus: keyboard;
@@ -400,8 +439,17 @@ export component AppWindow inherits Window {
         Surface {
             x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
             width: parent.width; height: parent.height;
-            visible: root.unlocked && !root.details-open && !root.editing && !root.verification-active
-                && !root.settings-open && !root.maintenance-open && !root.backups-open && !root.about-open && !root.reset-open;
+            visible: root.accounts-visible;
+            if root.has-wallpaper: Image {
+                x: 0px; y: 0px; width: parent.width; height: parent.height;
+                source: root.wallpaper-image;
+                image-fit: cover;
+                accessible-role: none;
+            }
+            if root.has-wallpaper: Rectangle {
+                background: Theme.canvas.with-alpha(1 - root.wallpaper-amount);
+                accessible-role: none;
+            }
             VerticalLayout {
                 padding: 16px;
                 padding-top: root.compact ? 12px : 16px;
@@ -411,20 +459,21 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     padding-right: 36px;
                     BrandMark { width: 22px; height: 22px; border-radius: 6px; y: (parent.height - self.height) / 2; }
-                    Text { text: "快速填充"; font-size: 15px; font-weight: 700; color: Theme.ink; vertical-alignment: center; horizontal-stretch: 0; }
+                    Text { text: "快速填充"; font-size: 15px; font-weight: 700; color: Theme.ink; stroke: root.wallpaper-outline; stroke-width: 2px; stroke-style: outside; vertical-alignment: center; horizontal-stretch: 0; }
                     Rectangle { horizontal-stretch: 1; }
-                    Text { text: root.entries.length + " 个结果"; font-size: 11px; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 0; }
-                    KeyHint { keys: "Esc"; action: "收起"; }
+                    ListCaption { text: root.entries.length + " 个结果"; text-color: root.list-label-color; background: root.wallpaper-caption-fill; }
+                    KeyHint { keys: "Esc"; action: "收起"; action-color: root.list-label-color; fill-alpha: root.wallpaper-text-fill; }
                 }
-                if root.compact: SectionCard {
-                    background: Theme.surface-muted;
+                if root.compact: target-banner := SectionCard {
+                    background: Theme.surface-muted.with-alpha(root.wallpaper-text-fill);
+                    property <color> location-color: root.has-wallpaper ? Theme.ink : Theme.muted;
                     height: 28px;
                     HorizontalLayout {
                         padding-left: 10px; padding-right: 10px; spacing: 10px;
                         Text { text: root.target-label; color: root.can-fill ? Theme.ink : Theme.warning; font-weight: 600; overflow: elide; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; min-width: 0px; }
                         if root.target-detail-label != "" && (!root.show-target-location || root.target-detail.coordinates == ""): Text {
                             text: root.show-target-location ? root.target-detail-label : root.target-location;
-                            color: Theme.muted; font-size: 11px; vertical-alignment: center;
+                            color: target-banner.location-color; font-size: 12px; vertical-alignment: center;
                             horizontal-stretch: 0; overflow: elide; max-width: 295px;
                         }
                         if root.show-target-location && root.target-detail.coordinates != "": Rectangle {
@@ -432,14 +481,14 @@ export component AppWindow inherits Window {
                             accessible-role: text; accessible-label: root.target-detail-label;
                             HorizontalLayout {
                                 spacing: 4px;
-                                Text { text: root.target-detail.prefix; font-size: 11px; color: Theme.muted; vertical-alignment: center; accessible-role: none; }
-                                Text { text: root.target-detail.coordinates; font-family: "Consolas"; font-size: 11px; color: Theme.muted; vertical-alignment: center; accessible-role: none; }
-                                Text { text: root.target-detail.suffix; font-size: 11px; color: Theme.muted; vertical-alignment: center; accessible-role: none; }
+                                Text { text: root.target-detail.prefix; font-size: 12px; color: target-banner.location-color; vertical-alignment: center; accessible-role: none; }
+                                Text { text: root.target-detail.coordinates; font-family: "Consolas"; font-size: 12px; color: target-banner.location-color; vertical-alignment: center; accessible-role: none; }
+                                Text { text: root.target-detail.suffix; font-size: 12px; color: target-banner.location-color; vertical-alignment: center; accessible-role: none; }
                             }
                         }
-                        if root.target-detail-label != "": Button {
+                        if root.target-detail-label != "": Button { fill-alpha: root.wallpaper-text-fill;
                             text: root.show-target-location ? "收起位置" : "位置详情";
-                            height: 24px; label-padding: 6px; subtle: true;
+                            height: 24px; label-padding: 6px; label-font-size: 12px; muted-label: !root.has-wallpaper; subtle: true;
                             clicked => { root.show-target-location = !root.show-target-location; }
                         }
                     }
@@ -447,9 +496,9 @@ export component AppWindow inherits Window {
                 if !root.compact: HorizontalLayout {
                     spacing: 10px; padding-right: 116px;
                     BrandMark { width: 30px; height: 30px; border-radius: 9px; y: (parent.height - self.height) / 2; }
-                    Text { text: "Keyisle"; font-size: 20px; font-weight: 700; color: Theme.ink; vertical-alignment: center; horizontal-stretch: 0; }
+                    Text { text: "Keyisle"; font-size: 20px; font-weight: 700; color: Theme.ink; stroke: root.wallpaper-outline; stroke-width: 2px; stroke-style: outside; vertical-alignment: center; horizontal-stretch: 0; }
                     Rectangle { horizontal-stretch: 1; }
-                    if root.update-available: Button {
+                    if root.update-available: Button { fill-alpha: root.wallpaper-control-fill;
                         icon: @image-url("../assets/icons/sparkles.svg");
                         text: "新版本 v" + root.update-version;
                         height: 30px;
@@ -457,7 +506,7 @@ export component AppWindow inherits Window {
                         enabled: !root.account-batch && !root.delete-confirm && !root.ui-blocked;
                         clicked => { root.open-about(); }
                     }
-                    Button {
+                    Button { fill-alpha: root.wallpaper-control-fill;
                         icon: @image-url("../assets/icons/plus.svg");
                         text: "新增账号";
                         width: 108px;
@@ -468,11 +517,12 @@ export component AppWindow inherits Window {
                 }
                 Rectangle {
                     height: root.compact || root.wide-list ? Theme.control-height : Theme.control-height * 2 + 8px;
-                    search := LineEdit {
+                    search := SearchField {
+                        fill-alpha: root.wallpaper-control-fill;
                         x: 0px; y: 0px;
                         width: root.wide-list ? parent.width - filters.width - 8px : parent.width;
                         height: Theme.control-height;
-                        accessible-label: "搜索账号";
+                        label: "搜索账号";
                         text <=> root.query;
                         placeholder-text: "搜索账号 · 支持拼音和简拼";
                         enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
@@ -508,23 +558,25 @@ export component AppWindow inherits Window {
                         width: root.wide-list ? min(320px, parent.width * 0.44) : parent.width;
                         HorizontalLayout {
                             spacing: 8px;
-                            ComboBox {
+                            FilterComboBox {
+                                fill-alpha: root.wallpaper-control-fill;
                                 min-width: 0px;
                                 horizontal-stretch: 1;
                                 height: Theme.control-height;
                                 model: root.categories;
                                 current-index <=> root.category-index;
-                                accessible-label: "分类筛选";
+                                label: "分类筛选";
                                 enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
                                 selected(value) => { root.category = self.current-index == 0 ? "" : value; root.search-changed(); }
                             }
-                            ComboBox {
+                            FilterComboBox {
+                                fill-alpha: root.wallpaper-control-fill;
                                 min-width: 0px;
                                 horizontal-stretch: 1;
                                 height: Theme.control-height;
                                 model: root.tags;
                                 current-index <=> root.tag-index;
-                                accessible-label: "标签筛选";
+                                label: "标签筛选";
                                 enabled: !root.busy && !root.ui-blocked && !root.delete-confirm;
                                 selected(value) => { root.tag = self.current-index == 0 ? "" : value; root.search-changed(); }
                             }
@@ -534,135 +586,182 @@ export component AppWindow inherits Window {
                 if !root.compact: HorizontalLayout {
                     min-height: 26px;
                     spacing: 8px;
-                    Text { text: root.entries.length + " 个账号"; font-size: 12px; font-weight: 600; color: Theme.muted; vertical-alignment: center; }
+                    ListCaption { text: root.entries.length + " 个账号"; text-color: root.list-label-color; background: root.wallpaper-caption-fill; }
                     Rectangle { horizontal-stretch: 1; }
-                    if root.query != "" || root.category != "" || root.tag != "": Button {
-                        subtle: true;
+                    if root.has-filters && root.entries.length > 0: Button { fill-alpha: root.wallpaper-text-fill;
+                        subtle: !root.has-wallpaper;
                         text: "清除筛选";
                         height: 28px;
                         label-padding: 10px;
                         enabled: !root.busy && !root.ui-blocked;
-                        clicked => { root.query = ""; root.category = ""; root.tag = ""; root.search-changed(); root.focus-search(); }
+                        clicked => { root.clear-filters(); }
                     }
-                    if root.wide-list: Text { text: "分类 · 标签"; width: 148px; font-size: 11px; color: Theme.muted; vertical-alignment: center; horizontal-stretch: 0; }
+                    if root.wide-list: Rectangle {
+                        width: 148px;
+                        ListCaption {
+                            x: 0px; width: self.min-width; y: (parent.height - self.height) / 2;
+                            text: "分类 · 标签"; text-color: root.list-label-color; background: root.wallpaper-caption-fill;
+                        }
+                    }
                 }
-                results := ScrollView {
+                SectionCard {
+                    property <length> inset: root.compact ? 0px : 4px;
+                    background: root.compact ? transparent : Theme.surface.with-alpha(1 - root.wallpaper-amount);
+                    border-width: root.compact ? 0px : 1px;
+                    clip: !root.compact;
                     vertical-stretch: root.compact ? 0 : 1;
                     min-height: root.compact ? root.popup-results-height : 0px;
                     max-height: root.compact ? root.popup-results-height : 32767px;
-                    content-width: self.visible-width;
-                    content-height: max(self.visible-height, root.entries.length * root.row-stride);
-                    TouchArea {
-                        width: results.visible-width; height: results.content-height;
-                        enabled: !root.busy && !root.ui-blocked;
-                        moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
-                        pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
-                        VerticalLayout {
-                            y: 0px;
-                            width: parent.width;
-                            height: root.entries.length > 0 ? root.entries.length * root.row-stride - (root.row-stride - root.row-height) : 52px;
-                            spacing: root.row-stride - root.row-height;
-                            for entry[index] in root.entries: Rectangle {
-                                property <bool> marked: root.account-batch ? entry.checked : index == root.selected;
-                                height: root.row-height;
-                                border-radius: root.compact ? Theme.control-radius : 0px;
-                                background: self.marked ? Theme.selection : row-touch.has-hover ? Theme.hover : Theme.surface;
-                                border-width: root.compact ? 1px : 0px;
-                                border-color: self.marked ? Theme.selection-line : Theme.line-subtle;
-                                accessible-role: button;
-                                accessible-label: (index == root.selected ? "已选择，" : "") + entry.title + "，" + (root.compact ? entry.hint : entry.username + "，" + entry.detail);
-                                accessible-action-default => { if (!root.delete-confirm) { root.selected = index; } }
-                                if !root.compact: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line-subtle; }
-                                if self.marked: Rectangle { x: 0px; y: 8px; width: 3px; height: parent.height - 16px; border-radius: 2px; background: Theme.brand; }
-                                VerticalLayout {
-                                    padding: 6px;
-                                    padding-left: root.account-batch ? 43px : 13px;
-                                    padding-right: root.wide-list ? 158px : 12px;
-                                    spacing: 2px;
-                                    HorizontalLayout {
-                                        spacing: 6px;
-                                        alignment: start;
-                                        if entry.sensitive: SensitiveBadge { y: (parent.height - self.height) / 2; }
-                                        StyledText { accessible-role: text; accessible-label: entry.title; text: entry.title-rich; default-color: Theme.ink; default-font-size: 14px; min-width: 0px; max-lines: 1; }
-                                    }
-                                    StyledText { accessible-role: text; accessible-label: root.compact ? entry.hint : entry.username; text: root.compact ? entry.hint-rich : entry.user-rich; default-color: Theme.text; default-font-size: 12px; min-width: 0px; max-lines: 1; }
-                                    if !root.compact && !root.wide-list: StyledText { accessible-role: text; accessible-label: entry.detail; text: entry.detail-rich; default-color: Theme.muted; default-font-size: 11px; min-width: 0px; max-lines: 1; }
-                                }
-                                if root.wide-list && entry.detail != "": Rectangle {
-                                    x: parent.width - 148px; width: 136px;
-                                    height: parent.height;
-                                    Rectangle {
-                                        x: 0px;
-                                        width: row-detail.preferred-width + 12px;
-                                        height: 22px; y: (parent.height - self.height) / 2;
-                                        visible: self.width <= parent.width;
-                                        border-radius: 6px; background: Theme.surface-muted;
+                    results := ScrollView {
+                        x: parent.inset; y: parent.inset;
+                        width: parent.width - 2 * parent.inset; height: parent.height - 2 * parent.inset;
+                        content-width: self.visible-width;
+                        content-height: max(self.visible-height, root.entries.length * root.row-stride);
+                        TouchArea {
+                            width: results.visible-width; height: results.content-height;
+                            enabled: !root.busy && !root.ui-blocked;
+                            moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
+                            pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
+                            VerticalLayout {
+                                y: 0px;
+                                width: parent.width;
+                                height: root.entries.length > 0 ? root.entries.length * root.row-stride - (root.row-stride - root.row-height) : root.compact ? 52px : 0px;
+                                spacing: root.row-stride - root.row-height;
+                                for entry[index] in root.entries: Rectangle {
+                                    property <bool> marked: root.account-batch ? entry.checked : index == root.selected;
+                                    property <string> accessible-title: entry.sensitive ? "敏感 · " + entry.title : entry.title;
+                                    height: root.row-height;
+                                    border-radius: root.compact ? Theme.control-radius : 0px;
+                                    property <color> row-fill: self.marked ? Theme.selection : row-touch.has-hover ? Theme.hover : Theme.surface;
+                                    background: self.row-fill.with-alpha(root.wallpaper-text-fill);
+                                    border-width: root.compact ? 1px : 0px;
+                                    border-color: self.marked ? Theme.selection-line : Theme.line-subtle;
+                                    accessible-role: button;
+                                    accessible-label: (index == root.selected ? "已选择，" : "") + self.accessible-title + "，" + (root.compact ? entry.hint : entry.username + "，" + entry.detail);
+                                    accessible-action-default => { if (!root.delete-confirm) { root.selected = index; } }
+                                    if !root.compact: Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line-subtle; }
+                                    if self.marked: Rectangle { x: 0px; y: 8px; width: 3px; height: parent.height - 16px; border-radius: 2px; background: Theme.brand; }
+                                    if !root.compact: Rectangle {
+                                        x: root.account-batch ? 44px : 13px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 28px; height: 28px;
+                                        border-radius: 8px;
+                                        background: (entry.sensitive ? Theme.danger-soft : Theme.surface-muted).with-alpha(root.wallpaper-control-fill);
                                         accessible-role: none;
+                                        Image {
+                                            width: 15px; height: 15px;
+                                            source: entry.sensitive ? @image-url("../assets/icons/shield.svg") : @image-url("../assets/icons/lock.svg");
+                                            colorize: entry.sensitive ? Theme.danger : Theme.brand;
+                                        }
                                     }
-                                    row-detail := StyledText {
-                                        x: 6px; width: parent.width - 12px;
-                                        y: (parent.height - self.preferred-height) / 2;
-                                        height: self.preferred-height;
-                                        accessible-role: text; accessible-label: entry.detail;
-                                        text: entry.detail-rich; default-color: Theme.muted; default-font-size: 11px; max-lines: 1;
+                                    VerticalLayout {
+                                        padding: 6px;
+                                        padding-left: root.compact ? 13px : root.account-batch ? 79px : 49px;
+                                        padding-right: root.wide-list ? 158px : 12px;
+                                        spacing: 2px;
+                                        HorizontalLayout {
+                                            spacing: 6px;
+                                            alignment: start;
+                                            if root.compact && entry.sensitive: SensitiveBadge { y: (parent.height - self.height) / 2; }
+                                            if root.query == "": Text { accessible-label: accessible-title; text: entry.title; color: Theme.ink; font-size: 14px; font-weight: 600; min-width: 0px; overflow: elide; }
+                                            if root.query != "": StyledText { accessible-role: text; accessible-label: accessible-title; text: entry.title-rich; default-color: Theme.ink; default-font-size: 14px; min-width: 0px; max-lines: 1; }
+                                        }
+                                        StyledText { accessible-role: text; accessible-label: root.compact ? entry.hint : entry.username; text: root.compact ? entry.hint-rich : entry.user-rich; default-color: root.has-wallpaper ? Theme.ink : Theme.text; default-font-size: 12px; min-width: 0px; max-lines: 1; }
+                                        if !root.compact && !root.wide-list: StyledText { accessible-role: text; accessible-label: entry.detail; text: entry.detail-rich; default-color: root.has-wallpaper ? Theme.ink : Theme.muted; default-font-size: 12px; min-width: 0px; max-lines: 1; }
+                                    }
+                                    if root.wide-list && entry.detail != "": Rectangle {
+                                        x: parent.width - 148px; width: 136px;
+                                        height: parent.height;
+                                        property <bool> marked: parent.marked;
+                                        Rectangle {
+                                            x: 0px;
+                                            width: row-detail.preferred-width + 12px;
+                                            height: 22px; y: (parent.height - self.height) / 2;
+                                            visible: self.width <= parent.width;
+                                            border-radius: 6px;
+                                            background: (parent.marked ? Theme.surface : Theme.surface-muted).with-alpha(root.wallpaper-control-fill);
+                                            border-width: parent.marked ? 1px : 0px;
+                                            border-color: Theme.selection-line;
+                                            accessible-role: none;
+                                        }
+                                        row-detail := StyledText {
+                                            x: 6px; width: parent.width - 12px;
+                                            y: (parent.height - self.preferred-height) / 2;
+                                            height: self.preferred-height;
+                                            accessible-role: text; accessible-label: entry.detail;
+                                            text: entry.detail-rich; default-color: root.has-wallpaper ? Theme.ink : Theme.muted; default-font-size: 12px; max-lines: 1;
+                                        }
+                                    }
+                                    row-touch := TouchArea {
+                                        enabled: !root.busy && !root.ui-blocked && !root.account-batch && !root.delete-confirm;
+                                        mouse-cursor: pointer;
+                                        clicked => { root.selected = index; root.focus-search(); }
+                                        double-clicked => { if (!root.compact && !root.ui-blocked && !root.delete-confirm) { root.selected = index; root.edit-entry(); } }
+                                        moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
+                                        pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
+                                    }
+                                    if root.account-batch: CheckBox {
+                                        x: 12px; y: (parent.height - self.height) / 2; width: 24px; height: 24px;
+                                        accessible-label: "选择账号 " + accessible-title;
+                                        checked <=> entry.checked;
+                                        enabled: !root.ui-blocked && !root.delete-confirm;
+                                        toggled => { root.check-account(index, self.checked); }
+                                        changed has-focus => { if (self.has-focus) { root.selected = index; root.scroll-selected(); } }
                                     }
                                 }
-                                row-touch := TouchArea {
-                                    enabled: !root.busy && !root.ui-blocked && !root.account-batch && !root.delete-confirm;
-                                    mouse-cursor: pointer;
-                                    clicked => { root.selected = index; root.focus-search(); }
-                                    double-clicked => { if (!root.compact && !root.ui-blocked && !root.delete-confirm) { root.selected = index; root.edit-entry(); } }
-                                    moved => { if (!root.compact && self.pressed && (abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px)) { root.drag-window(); } }
-                                    pointer-event(event) => { if (event.button == PointerEventButton.right && event.kind == PointerEventKind.down) { root.request-context((self.absolute-position.x + self.mouse-x) / 1px, (self.absolute-position.y + self.mouse-y) / 1px); } }
-                                }
-                                if root.account-batch: CheckBox {
-                                    x: 12px; width: 28px; height: parent.height;
-                                    accessible-label: "选择账号 " + entry.title;
-                                    checked <=> entry.checked;
-                                    enabled: !root.ui-blocked && !root.delete-confirm;
-                                    toggled => { root.check-account(index, self.checked); }
-                                    changed has-focus => { if (self.has-focus) { root.selected = index; root.scroll-selected(); } }
-                                }
-                            }
-                            if root.entries.length == 0: SectionCard {
-                                height: 52px;
-                                background: Theme.surface-muted;
-                                Text {
-                                    x: 14px; width: parent.width - 28px; height: parent.height;
-                                    text: root.query == "" && root.category == "" && root.tag == ""
-                                        ? (root.compact ? "暂无账号，按 Ctrl+Shift+M 打开管理。" : "暂无账号，点击「新增账号」开始。")
-                                        : "没有匹配的账号，请调整关键词或筛选条件。";
-                                    color: Theme.muted;
-                                    vertical-alignment: center;
-                                    wrap: word-wrap;
+                                if root.compact && root.entries.length == 0: SectionCard {
+                                    height: 52px;
+                                    background: Theme.surface-muted.with-alpha(root.wallpaper-text-fill);
+                                    Text {
+                                        x: 14px; width: parent.width - 28px; height: parent.height;
+                                        text: root.query == "" && root.category == "" && root.tag == ""
+                                            ? "暂无账号，按 Ctrl+Shift+M 打开管理。"
+                                            : "没有匹配的账号，请调整关键词或筛选条件。";
+                                        color: root.list-label-color;
+                                        vertical-alignment: center;
+                                        wrap: word-wrap;
+                                    }
                                 }
                             }
                         }
                     }
+                    if !root.compact && root.entries.length == 0: ListEmpty {
+                        width: parent.width; height: parent.height;
+                        icon: @image-url("../assets/icons/search.svg");
+                        title: root.has-filters ? "没有匹配的账号" : "暂无账号";
+                        description: root.has-filters ? "试试其他关键词，或清除当前筛选。" : "点击「新增账号」保存第一条记录。";
+                        action: root.has-filters ? "清除筛选" : "";
+                        action-enabled: !root.busy && !root.ui-blocked;
+                        backing: root.wallpaper-caption-fill;
+                        activated => { root.clear-filters(); }
+                    }
                 }
-                if root.compact && root.status == "": HorizontalLayout {
-                    spacing: 12px;
-                    alignment: start;
-                    KeyHint { keys: "Enter"; action: "密码"; }
-                    KeyHint { keys: "Ctrl+Enter"; action: "用户名"; }
-                    KeyHint { keys: "Shift+Enter"; action: "连填"; }
-                    Rectangle { horizontal-stretch: 1; }
-                    KeyHint { keys: "Ctrl+Shift+M"; action: "管理"; }
+                if root.compact && root.status == "": Rectangle {
+                    vertical-stretch: 1; min-height: 28px;
+                    HorizontalLayout {
+                        height: 28px; y: (parent.height - self.height) / 2;
+                        spacing: 12px;
+                        alignment: start;
+                        KeyHint { keys: "Enter"; action: "密码"; action-color: root.list-label-color; fill-alpha: root.wallpaper-text-fill; }
+                        KeyHint { keys: "Ctrl+Enter"; action: "用户名"; action-color: root.list-label-color; fill-alpha: root.wallpaper-text-fill; }
+                        KeyHint { keys: "Shift+Enter"; action: "连填"; action-color: root.list-label-color; fill-alpha: root.wallpaper-text-fill; }
+                        KeyHint { keys: "Ctrl+Shift+M"; action: "管理"; action-color: root.list-label-color; fill-alpha: root.wallpaper-text-fill; }
+                    }
                 }
                 if root.status != "": StatusBanner { text: root.status; success: root.status-success; compact: root.compact; }
-                if root.compact: Rectangle { vertical-stretch: 1; min-height: 0px; }
+                if root.compact && root.status != "": Rectangle { vertical-stretch: 1; min-height: 0px; }
                 if !root.compact: Rectangle { height: 1px; background: Theme.line-subtle; }
                 if root.delete-confirm || root.account-batch: HorizontalLayout {
                     spacing: 8px;
-                    if root.delete-confirm: Button {
+                    if root.delete-confirm: Button { fill-alpha: root.wallpaper-text-fill;
                         text: "取消删除";
                         init => { self.focus(); }
                         clicked => { root.cancel-delete(); }
                     }
-                    if root.account-batch && !root.delete-confirm: Button { text: "退出批量选择"; enabled: !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
-                    if root.account-batch: Text { text: "已选 " + root.account-checked + " 个账号"; color: Theme.muted; vertical-alignment: center; }
+                    if root.account-batch && !root.delete-confirm: Button { fill-alpha: root.wallpaper-text-fill; text: "退出批量选择"; enabled: !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
+                    if root.account-batch: ListCaption { text: "已选 " + root.account-checked + " 个账号"; text-color: root.list-label-color; background: root.wallpaper-caption-fill; }
                     Rectangle { horizontal-stretch: 1; }
-                    Button {
+                    Button { fill-alpha: root.wallpaper-control-fill;
                         icon: @image-url("../assets/icons/trash.svg");
                         danger: true;
                         primary: root.delete-confirm;
@@ -673,23 +772,35 @@ export component AppWindow inherits Window {
                 }
                 if !root.compact && !root.account-batch && !root.delete-confirm: HorizontalLayout {
                     spacing: 8px;
-                    Button { icon: @image-url("../assets/icons/settings.svg"); subtle: true; text: "设置"; enabled: !root.ui-blocked; clicked => { root.open-settings(); } }
-                    Button { icon: @image-url("../assets/icons/archive.svg"); subtle: true; text: "备份管理"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
+                    Button { fill-alpha: root.wallpaper-text-fill; icon: @image-url("../assets/icons/settings.svg"); subtle: !root.has-wallpaper; text: "设置"; enabled: !root.ui-blocked; clicked => { root.open-settings(); } }
+                    Button { fill-alpha: root.wallpaper-text-fill; icon: @image-url("../assets/icons/archive.svg"); subtle: !root.has-wallpaper; text: "备份管理"; enabled: !root.ui-blocked; clicked => { root.open-backups(); } }
                     Rectangle { horizontal-stretch: 1; }
-                    Button { text: "查看详情"; enabled: root.selected >= 0 && !root.ui-blocked && !root.delete-confirm; clicked => { root.view-entry(); } }
-                    Button { text: "批量选择"; enabled: root.entries.length > 0 && !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
-                    Button { icon: @image-url("../assets/icons/lock.svg"); text: "锁定"; clicked => { root.lock-vault(); } }
-                    more-button := Button { icon: @image-url("../assets/icons/more.svg"); subtle: true; text: "更多"; enabled: !root.ui-blocked; clicked => { root.app-menu-index = 0; root.app-menu-open = !root.app-menu-open; if (root.app-menu-open) { app-menu.focus(); } } }
+                    Button { fill-alpha: root.wallpaper-text-fill; text: "查看详情"; enabled: root.selected >= 0 && !root.ui-blocked && !root.delete-confirm; clicked => { root.view-entry(); } }
+                    Button { fill-alpha: root.wallpaper-text-fill; text: "批量选择"; enabled: root.entries.length > 0 && !root.ui-blocked; clicked => { root.toggle-account-batch(); root.focus-search(); } }
+                    Button { fill-alpha: root.wallpaper-text-fill; icon: @image-url("../assets/icons/lock.svg"); text: "锁定"; clicked => { root.lock-vault(); } }
+                    more-button := Button { fill-alpha: root.wallpaper-text-fill;
+                        icon: @image-url("../assets/icons/more.svg"); subtle: !root.has-wallpaper; text: "更多"; enabled: !root.ui-blocked;
+                        clicked => {
+                            root.app-menu-right = self.absolute-position.x + self.width;
+                            root.app-menu-top = self.absolute-position.y;
+                            root.app-menu-index = 0;
+                            root.app-menu-open = !root.app-menu-open;
+                            if (root.app-menu-open) { app-menu.focus(); }
+                        }
+                    }
                 }
-                if !root.compact: HorizontalLayout {
-                    spacing: 8px;
-                    Text { text: root.shortcut-label + " 快速填充 · F2 编辑 · Alt+Enter 详情"; color: Theme.muted; font-size: 11px; horizontal-stretch: 1; overflow: elide; }
-                    Text { text: root.policy-label; color: Theme.muted; font-size: 11px; horizontal-alignment: right; horizontal-stretch: 1; overflow: elide; }
+                if !root.compact: Rectangle {
+                    height: root.has-wallpaper ? 24px : 17px;
+                    border-radius: 6px;
+                    background: root.wallpaper-caption-fill;
+                    HorizontalLayout {
+                        padding-left: root.has-wallpaper ? 8px : 0px;
+                        padding-right: root.has-wallpaper ? 8px : 0px;
+                        spacing: 12px;
+                        Text { text: root.shortcut-label + " 快速填充 · F2 编辑 · Alt+Enter 详情"; color: root.list-label-color; font-size: 12px; font-weight: root.has-wallpaper ? 600 : 400; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        Text { text: root.policy-label; color: root.list-label-color; font-size: 12px; font-weight: root.has-wallpaper ? 600 : 400; vertical-alignment: center; horizontal-alignment: right; horizontal-stretch: 1; overflow: elide; }
+                    }
                 }
-            }
-            if !root.compact: SectionCard {
-                x: results.x; y: results.y; width: results.width; height: results.height;
-                background: transparent; accessible-role: none;
             }
         }
 
@@ -747,7 +858,7 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                if root.create-strength != "": Text { text: root.create-strength; color: Theme.warning; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+                if root.new-vault: StrengthMeter { hint: root.master-strength-hint(root.master); }
                 confirm-input := SecretField {
                     visible: root.new-vault;
                     height: root.new-vault ? 36px : 0px;
@@ -794,11 +905,11 @@ export component AppWindow inherits Window {
                     title: "账号信息";
                     description: root.edit-is-new ? "" : "保存前会自动生成加密备份。";
                 }
-                ScrollView {
+                editor-view := FormScrollView {
                     vertical-stretch: 1; content-width: self.visible-width;
                     VerticalLayout {
                         spacing: 8px;
-                        padding-right: 4px;
+                        padding-right: editor-view.scrollbar-gutter;
                         Text { text: "名称"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
                         edit-name-input := LineEdit { height: Theme.control-height; enabled: !root.ui-blocked; text <=> root.edit-title; placeholder-text: "例如：企业邮箱 / GitHub"; edited => { root.edit-dirty = true; root.activity(); } }
                         Text { text: "用户名"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
@@ -857,6 +968,7 @@ export component AppWindow inherits Window {
                                     height: Theme.control-height;
                                     accessible-label: "选择已有分类";
                                     model: root.edit-categories;
+                                    current-index <=> root.edit-category-choice;
                                     enabled: !root.ui-blocked;
                                     selected(value) => {
                                         if (self.current-index > 0) { root.edit-category = value; root.edit-dirty = true; root.activity(); }
@@ -876,6 +988,7 @@ export component AppWindow inherits Window {
                                         min-width: 0px;
                                         accessible-label: "添加已有标签";
                                         model: root.edit-tag-options;
+                                        current-index <=> root.edit-tag-choice;
                                         enabled: !root.ui-blocked;
                                         selected(value) => { root.activity(); }
                                     }
@@ -883,7 +996,7 @@ export component AppWindow inherits Window {
                                         text: "添加标签";
                                         label-padding: 8px;
                                         enabled: !root.ui-blocked && tag-picker.current-index > 0;
-                                        clicked => { root.append-edit-tag(tag-picker.current-value); }
+                                        clicked => { root.append-edit-tag(tag-picker.current-value); root.edit-tag-choice = 0; }
                                     }
                                 }
                             }
@@ -960,14 +1073,27 @@ export component AppWindow inherits Window {
                         KeyHint { keys: "Tab"; action: "切换方式"; }
                         KeyHint { keys: "Enter"; action: "验证"; }
                     }
-                    verification-input := SecretField {
-                        visible: root.verify-source == 2;
-                        text <=> root.verify-master;
-                        mask-serial: root.secret-serial;
-                        placeholder-text: "密码库主密码";
-                        enabled: !root.working;
-                        edited => { root.activity(); }
-                        accepted => { if (!root.working) { root.verify-selected(); } }
+                    Rectangle {
+                        height: Theme.control-height;
+                        verification-input := SecretField {
+                            visible: root.verify-source == 2;
+                            text <=> root.verify-master;
+                            mask-serial: root.secret-serial;
+                            placeholder-text: "密码库主密码";
+                            enabled: !root.working;
+                            edited => { root.activity(); }
+                            accepted => { if (!root.working) { root.verify-selected(); } }
+                        }
+                        if root.verify-source != 2: SectionCard {
+                            background: Theme.surface-muted;
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px;
+                                Text {
+                                    text: "点击下方按钮后，在 Windows 安全窗口验证当前账户身份。";
+                                    color: Theme.muted; font-size: 12px; vertical-alignment: center; wrap: word-wrap;
+                                }
+                            }
+                        }
                     }
                     if root.status != "": StatusBanner { text: root.status; success: false; compact: root.compact; }
                     Rectangle { vertical-stretch: 1; min-height: 0px; }
@@ -994,9 +1120,25 @@ export component AppWindow inherits Window {
             property <int> focus-request: root.main-focus-serial;
             changed focus-request => { if (self.visible) { appearance-input.focus(); } }
             property <int> top-request: root.settings-scroll-serial;
-            changed top-request => { settings-view.content-y = 0px; }
-            function jump-to-setting(y: length) {
-                settings-view.content-y = -clamp(y, 0px, max(0px, settings-view.content-height - settings-view.visible-height));
+            property <length> scroll-limit: max(0px, settings-view.content-height - settings-view.visible-height);
+            property <length> scroll-offset: -settings-view.content-y;
+            property <int> jumped-section: -1;
+            property <length> jump-offset;
+            property <int> active-section:
+                self.jumped-section >= 0 && abs(self.scroll-offset - self.jump-offset) < 1px ? self.jumped-section
+                : (self.scroll-limit > 0px && self.scroll-offset >= self.scroll-limit - 1px) || self.scroll-offset >= startup-panel.y - 1px ? 4
+                : self.scroll-offset >= backup-panel.y - 1px ? 3
+                : self.scroll-offset >= security-panel.y - 1px ? 2
+                : self.scroll-offset >= shortcut-panel.y - 1px ? 1 : 0;
+            changed top-request => { self.jumped-section = -1; settings-view.content-y = 0px; }
+            function jump-to-setting(section: int) {
+                let y = section == 4 ? startup-panel.y
+                    : section == 3 ? backup-panel.y
+                    : section == 2 ? security-panel.y
+                    : section == 1 ? shortcut-panel.y : appearance-panel.y;
+                self.jumped-section = section;
+                self.jump-offset = clamp(y, 0px, self.scroll-limit);
+                settings-view.content-y = -self.jump-offset;
                 root.activity();
             }
             x: 0px; y: 0px; border-radius: 0px; border-width: 0px; background: Theme.canvas;
@@ -1013,19 +1155,22 @@ export component AppWindow inherits Window {
                     background: Theme.surface-muted; height: 38px;
                     HorizontalLayout {
                         padding: 4px; spacing: 4px;
-                        Button { height: 30px; text: "外观"; subtle: true; label-padding: 8px; clicked => { settings-page.jump-to-setting(appearance-panel.y); } }
-                        Button { height: 30px; text: "快捷填充"; subtle: true; label-padding: 8px; clicked => { settings-page.jump-to-setting(shortcut-panel.y); } }
-                        Button { height: 30px; text: "安全"; subtle: true; label-padding: 8px; clicked => { settings-page.jump-to-setting(security-panel.y); } }
-                        Button { height: 30px; text: "备份与维护"; subtle: true; label-padding: 8px; clicked => { settings-page.jump-to-setting(backup-panel.y); } }
-                        Button { height: 30px; text: "启动与更新"; subtle: true; label-padding: 8px; clicked => { settings-page.jump-to-setting(startup-panel.y); } }
+                        for label[index] in ["外观", "快捷填充", "安全", "备份与维护", "启动与更新"]: Button {
+                            width: (parent.width - 24px) / 5; height: 30px;
+                            text: label; subtle: true; label-padding: 8px;
+                            selected: settings-page.active-section == index;
+                            clicked => { settings-page.jump-to-setting(index); }
+                        }
                     }
                 }
-                Rectangle { height: 1px; background: Theme.line-subtle; }
-                settings-view := ScrollView {
+                settings-view := FormScrollView {
                     vertical-stretch: 1; content-width: self.visible-width;
+                    changed content-y => {
+                        if (abs(settings-page.scroll-offset - settings-page.jump-offset) >= 1px) { settings-page.jumped-section = -1; }
+                    }
                     VerticalLayout {
                         spacing: 8px;
-                        padding-right: 4px;
+                        padding-right: settings-view.scrollbar-gutter;
                         appearance-panel := SectionCard {
                             VerticalLayout {
                                 padding: 10px; spacing: 6px;
@@ -1040,6 +1185,53 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 1; spacing: 4px;
                                         Text { text: "外观配色"; font-size: 13px; font-weight: 600; color: Theme.ink; }
                                         ComboBox { height: Theme.control-height; model: ["青绿 · 默认", "经典蓝", "柔和紫", "石墨灰"]; accessible-label: "外观配色"; current-index <=> root.theme-choice; enabled: !root.ui-blocked; selected(value) => { root.activity(); } }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: Theme.line-subtle; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text { text: "窗口背景"; font-size: 13px; font-weight: 600; color: Theme.ink; vertical-alignment: center; }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    if root.wallpaper-loading || root.wallpaper-importing: Text {
+                                        text: root.wallpaper-importing ? "正在处理图片…" : "正在读取背景…";
+                                        font-size: 12px; color: Theme.text; vertical-alignment: center;
+                                    }
+                                    if root.wallpaper-preview.width > 0: Button {
+                                        text: "移除图片"; subtle: true; enabled: !root.ui-blocked && !root.wallpaper-importing;
+                                        clicked => { root.remove-wallpaper(); }
+                                    }
+                                    Button {
+                                        text: "选择背景图片"; enabled: !root.ui-blocked && !root.wallpaper-loading && !root.wallpaper-importing;
+                                        clicked => { root.choose-wallpaper(); }
+                                    }
+                                }
+                                if root.wallpaper-preview.width > 0: HorizontalLayout {
+                                    spacing: 14px;
+                                    SectionCard {
+                                        width: 184px; height: 94px;
+                                        background: root.wallpaper-preview-canvas; clip: true;
+                                        Image {
+                                            x: 4px; y: 4px; width: parent.width - 8px; height: parent.height - 8px;
+                                            source: root.wallpaper-preview; image-fit: cover;
+                                            accessible-role: none;
+                                        }
+                                        Rectangle {
+                                            x: 4px; y: 4px; width: parent.width - 8px; height: parent.height - 8px;
+                                            background: root.wallpaper-preview-canvas.with-alpha(1 - root.wallpaper-transparency-choice / 100);
+                                            accessible-role: none;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        spacing: 6px; alignment: center;
+                                        Text { text: "界面透明度  " + Math.round(root.wallpaper-transparency-choice) + "%"; color: Theme.ink; font-size: 12px; font-weight: 600; }
+                                        Slider {
+                                            minimum: 0; maximum: root.wallpaper-max-transparency; step: 1;
+                                            value <=> root.wallpaper-transparency-choice;
+                                            accessible-label: "界面透明度";
+                                            enabled: !root.ui-blocked;
+                                            changed => { root.activity(); }
+                                        }
+                                        Text { text: "调高透明度可看到更多背景。保存后应用到账号管理和快速填充。"; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
                                     }
                                 }
                             }
@@ -1167,7 +1359,7 @@ export component AppWindow inherits Window {
                     Button { subtle: true; text: "返回账号列表"; enabled: !root.ui-blocked; clicked => { root.close-settings(); } }
                     Rectangle { horizontal-stretch: 1; }
                     if !root.recording-shortcut && root.settings-dirty: Text { text: "有未保存的设置"; color: Theme.warning; font-size: 12px; vertical-alignment: center; }
-                    Button { text: "保存设置"; label-padding: 16px; primary: true; enabled: !root.ui-blocked && !root.recording-shortcut; clicked => { root.save-settings(); } }
+                    Button { text: "保存设置"; label-padding: 16px; primary: true; enabled: !root.ui-blocked && !root.recording-shortcut && !root.wallpaper-importing; clicked => { root.save-settings(); } }
                 }
             }
         }
@@ -1187,12 +1379,12 @@ export component AppWindow inherits Window {
                     title: "主密码与本地备份";
                     description: "修改主密码并同步加密本地自动备份";
                 }
-                ScrollView {
+                maintenance-view := FormScrollView {
                     vertical-stretch: 1;
                     content-width: self.visible-width;
                     VerticalLayout {
                         spacing: 10px;
-                        padding-right: 4px;
+                        padding-right: maintenance-view.scrollbar-gutter;
                         SectionCard {
                             VerticalLayout {
                                 padding: 12px; spacing: 8px;
@@ -1236,7 +1428,7 @@ export component AppWindow inherits Window {
                                     edited => { root.activity(); }
                                     accepted => { if (!root.ui-blocked && !root.backups-confirm) { new-confirm-input.focus(); } }
                                 }
-                                if root.new-master-strength != "": Text { text: root.new-master-strength; color: Theme.warning; font-size: 12px; font-weight: 600; wrap: word-wrap; }
+                                StrengthMeter { hint: root.master-strength-hint(root.new-master); }
                                 Text { text: "确认新主密码"; font-size: 12.5px; font-weight: 600; color: Theme.text; }
                                 new-confirm-input := SecretField {
                                     text <=> root.new-confirmation;
@@ -1293,10 +1485,10 @@ export component AppWindow inherits Window {
                     backups-view.content-y = 0px;
                     return;
                 }
-                if (root.selected-backup * 72px < -backups-view.content-y) {
-                    backups-view.content-y = -min(root.selected-backup * 72px, max(0px, backups-view.content-height - backups-view.visible-height));
-                } else if (root.selected-backup * 72px + 72px > -backups-view.content-y + backups-view.visible-height) {
-                    backups-view.content-y = -min(max(0px, root.selected-backup * 72px + 72px - backups-view.visible-height), max(0px, backups-view.content-height - backups-view.visible-height));
+                if (root.selected-backup * root.backup-row-height < -backups-view.content-y) {
+                    backups-view.content-y = -min(root.selected-backup * root.backup-row-height, max(0px, backups-view.content-height - backups-view.visible-height));
+                } else if (root.selected-backup * root.backup-row-height + root.backup-row-height > -backups-view.content-y + backups-view.visible-height) {
+                    backups-view.content-y = -min(max(0px, root.selected-backup * root.backup-row-height + root.backup-row-height - backups-view.visible-height), max(0px, backups-view.content-height - backups-view.visible-height));
                 }
 
             }
@@ -1323,38 +1515,43 @@ export component AppWindow inherits Window {
                         Button { text: root.backup-batch ? "退出批量选择" : "批量选择"; enabled: !root.ui-blocked && root.backup-confirm-mode == 0 && (root.backup-batch || root.backup-rows.length > 0); clicked => { root.toggle-backup-batch(); } }
                         Button { icon: @image-url("../assets/icons/refresh.svg"); subtle: true; text: "刷新备份列表"; enabled: !root.ui-blocked && root.backup-confirm-mode == 0; clicked => { root.refresh-backups(); } }
                     }
-                    backups-view := ScrollView {
-                        vertical-stretch: 1; content-width: self.visible-width;
-                        VerticalLayout {
-                            spacing: 8px;
-                            for row[index] in root.backup-rows: Rectangle {
-                                property <bool> marked: root.backup-batch ? row.checked : index == root.selected-backup;
-                                height: 64px;
-                                background: self.marked ? Theme.selection : backup-touch.has-hover ? Theme.hover : Theme.surface;
-                                accessible-role: button; accessible-label: (index == root.selected-backup ? "已选择，" : "") + row.title + "，" + row.date + "，" + row.detail;
-                                accessible-action-default => { if (!root.ui-blocked && root.backup-confirm-mode == 0) { root.selected-backup = index; } }
-                                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line-subtle; }
-                                if self.marked: Rectangle { x: 0px; y: 12px; width: 3.5px; height: parent.height - 24px; border-radius: 2px; background: Theme.brand; }
-                                VerticalLayout {
-                                    padding: 10px; padding-left: root.backup-batch ? 43px : 14px; spacing: 4px;
-                                    Text { text: row.title + "  ·  " + row.date; color: Theme.ink; font-weight: 600; }
-                                    Text { text: row.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
-                                }
-                                backup-touch := TouchArea { enabled: !root.ui-blocked && !root.backup-batch && root.backup-confirm-mode == 0; mouse-cursor: pointer; clicked => { root.selected-backup = index; } }
-                                if root.backup-batch: CheckBox {
-                                    x: 12px; width: 28px; height: parent.height;
-                                    accessible-label: "选择备份 " + row.detail;
-                                    checked <=> row.checked;
-                                    enabled: !root.ui-blocked && root.backup-confirm-mode == 0;
-                                    toggled => { root.check-backup(index, self.checked); }
-                                    changed has-focus => { if (self.has-focus && root.backup-confirm-mode == 0) { root.selected-backup = index; root.scroll-backup-selected(); } }
+                    SectionCard {
+                        vertical-stretch: 1; clip: true;
+                        backups-view := ScrollView {
+                            x: 4px; y: 4px;
+                            width: parent.width - 8px; height: parent.height - 8px;
+                            content-width: self.visible-width;
+                            VerticalLayout {
+                                for row[index] in root.backup-rows: Rectangle {
+                                    property <bool> marked: root.backup-batch ? row.checked : index == root.selected-backup;
+                                    height: root.backup-row-height;
+                                    background: self.marked ? Theme.selection : backup-touch.has-hover ? Theme.hover : Theme.surface;
+                                    accessible-role: button; accessible-label: (index == root.selected-backup ? "已选择，" : "") + row.title + "，" + row.date + "，" + row.detail;
+                                    accessible-action-default => { if (!root.ui-blocked && root.backup-confirm-mode == 0) { root.selected-backup = index; } }
+                                    Rectangle { y: parent.height - 1px; height: 1px; background: Theme.line-subtle; }
+                                    if self.marked: Rectangle { x: 0px; y: 12px; width: 3.5px; height: parent.height - 24px; border-radius: 2px; background: Theme.brand; }
+                                    VerticalLayout {
+                                        padding: 10px; padding-left: root.backup-batch ? 43px : 14px; spacing: 4px;
+                                        Text { text: row.title + "  ·  " + row.date; color: Theme.ink; font-weight: 600; }
+                                        Text { text: row.detail; color: Theme.muted; font-size: 12px; overflow: elide; }
+                                    }
+                                    backup-touch := TouchArea { enabled: !root.ui-blocked && !root.backup-batch && root.backup-confirm-mode == 0; mouse-cursor: pointer; clicked => { root.selected-backup = index; } }
+                                    if root.backup-batch: CheckBox {
+                                        x: 12px; y: (parent.height - self.height) / 2; width: 24px; height: 24px;
+                                        accessible-label: "选择备份 " + row.detail;
+                                        checked <=> row.checked;
+                                        enabled: !root.ui-blocked && root.backup-confirm-mode == 0;
+                                        toggled => { root.check-backup(index, self.checked); }
+                                        changed has-focus => { if (self.has-focus && root.backup-confirm-mode == 0) { root.selected-backup = index; root.scroll-backup-selected(); } }
+                                    }
                                 }
                             }
-                            if root.backup-rows.length == 0: SectionCard {
-                                height: 56px;
-                                background: Theme.surface-muted;
-                                Text { x: 14px; width: parent.width - 28px; height: parent.height; vertical-alignment: center; text: "暂无本地备份。编辑已有账号时会自动创建加密备份。"; color: Theme.muted; wrap: word-wrap; }
-                            }
+                        }
+                        if root.backup-rows.length == 0: ListEmpty {
+                            width: parent.width; height: parent.height;
+                            icon: @image-url("../assets/icons/archive.svg");
+                            title: "暂无本地备份";
+                            description: "可创建加密备份。编辑已有账号时也会自动备份。";
                         }
                     }
                     if root.backup-confirm-mode != 0: Text {
@@ -1399,10 +1596,6 @@ export component AppWindow inherits Window {
                         }
                         if !root.backup-batch: Button { primary: root.backup-confirm-mode == 2; text: root.backup-confirm-mode == 2 ? "确认恢复此备份" : "恢复选中备份"; enabled: !root.ui-blocked && root.selected-backup >= 0 && root.backup-confirm-mode != 1; clicked => { root.restore-backup(); } }
                     }
-                }
-                SectionCard {
-                    x: backups-view.x; y: backups-view.y; width: backups-view.width; height: backups-view.height;
-                    background: transparent; accessible-role: none;
                 }
             }
         }
@@ -1486,7 +1679,7 @@ export component AppWindow inherits Window {
             return reject;
         }
         Rectangle {
-            background: Theme.surface; border-width: 1px; border-color: Theme.line; border-radius: 8px;
+            background: Theme.surface; border-width: 1px; border-color: Theme.window-line; border-radius: 8px;
             accessible-role: groupbox; accessible-label: "账号右键菜单";
             VerticalLayout {
                 padding: 4px; spacing: 2px;
@@ -1553,25 +1746,33 @@ export component AppWindow inherits Window {
                 padding: 16px; spacing: 10px;
                 HorizontalLayout {
                     padding-right: 116px; spacing: 10px;
-                    BrandMark { width: 34px; height: 34px; border-radius: 9px; }
-                    PageHeading {
-                        title: "账号详情";
-                        description: "只读查看 · 临时复制 15 秒后自动清除";
+                    BrandMark { width: 34px; height: 34px; border-radius: 9px; y: (parent.height - self.height) / 2; }
+                    VerticalLayout {
+                        spacing: 3px;
+                        HorizontalLayout {
+                            spacing: 8px; alignment: start;
+                            Text {
+                                text: root.details-title; font-size: 20px; font-weight: 700; color: Theme.ink; overflow: elide;
+                                min-width: 0px;
+                                accessible-label: root.details-sensitive ? "敏感项 · " + root.details-title : root.details-title;
+                            }
+                            if root.details-sensitive: SensitiveBadge { y: (parent.height - self.height) / 2; }
+                        }
+                        Text { text: "只读查看 · 临时复制 15 秒后自动清除"; color: Theme.muted; font-size: 12px; }
                     }
                 }
-                Text { text: root.details-title; font-size: 16px; font-weight: 600; color: Theme.ink; overflow: elide; }
-                ScrollView {
+                details-view := FormScrollView {
                     vertical-stretch: 1; content-width: self.visible-width;
                     VerticalLayout {
-                        spacing: 8px; alignment: start; padding-right: 4px;
+                        spacing: 8px; alignment: start; padding-right: details-view.scrollbar-gutter;
                         SectionCard {
                             VerticalLayout {
-                                padding: 12px; spacing: 6px;
+                                padding: 12px; spacing: 4px;
                                 Text { text: "登录凭据"; color: Theme.ink; font-weight: 700; font-size: 14px; }
                                 Text { text: "用户名"; color: Theme.text; font-weight: 600; font-size: 12px; }
                                 HorizontalLayout {
                                     spacing: 6px;
-                                    details-user-input := LineEdit { horizontal-stretch: 1; height: Theme.control-height; text: root.details-user; read-only: true; accessible-label: "详情用户名"; }
+                                    details-user-input := LineEdit { horizontal-stretch: 1; height: Theme.control-height; text: root.details-user; read-only: true; placeholder-text: "未填写"; accessible-label: "详情用户名"; }
                                     Button { icon: @image-url("../assets/icons/copy.svg"); text: "复制用户名"; label-padding: 10px; enabled: root.details-user != "" && !root.ui-blocked; clicked => { root.copy-details-user(); } }
                                 }
                                 Text { text: "密码"; color: Theme.text; font-weight: 600; font-size: 12px; }
@@ -1590,21 +1791,21 @@ export component AppWindow inherits Window {
                         }
                         SectionCard {
                             VerticalLayout {
-                                padding: 12px; spacing: 6px;
+                                padding: 12px; spacing: 4px;
                                 Text { text: "分类与备注"; color: Theme.ink; font-weight: 700; font-size: 14px; }
                                 HorizontalLayout {
                                     spacing: 12px;
-                                    VerticalLayout { horizontal-stretch: 1; spacing: 6px; Text { text: "分类"; color: Theme.text; font-weight: 600; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-category; read-only: true; accessible-label: "详情分类"; } }
-                                    VerticalLayout { horizontal-stretch: 1; spacing: 6px; Text { text: "标签"; color: Theme.text; font-weight: 600; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-tags; read-only: true; accessible-label: "详情标签"; } }
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 4px; Text { text: "分类"; color: Theme.text; font-weight: 600; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-category; read-only: true; placeholder-text: "未填写"; accessible-label: "详情分类"; } }
+                                    VerticalLayout { horizontal-stretch: 1; spacing: 4px; Text { text: "标签"; color: Theme.text; font-weight: 600; font-size: 12px; } LineEdit { height: Theme.control-height; text: root.details-tags; read-only: true; placeholder-text: "未填写"; accessible-label: "详情标签"; } }
                                 }
                                 Text { text: "网址"; color: Theme.text; font-weight: 600; font-size: 12px; }
                                 HorizontalLayout {
                                     spacing: 6px;
-                                    LineEdit { horizontal-stretch: 1; height: Theme.control-height; text: root.details-url; read-only: true; accessible-label: "详情网址"; }
+                                    LineEdit { horizontal-stretch: 1; height: Theme.control-height; text: root.details-url; read-only: true; placeholder-text: "未填写"; accessible-label: "详情网址"; }
                                     Button { icon: @image-url("../assets/icons/external.svg"); text: "打开网址"; label-padding: 10px; enabled: root.details-url != "" && !root.ui-blocked; clicked => { root.open-entry-url(); } }
                                 }
                                 Text { text: "备注"; color: Theme.text; font-weight: 600; font-size: 12px; }
-                                TextEdit { text: root.details-notes; read-only: true; height: 92px; accessible-label: "详情备注"; }
+                                TextEdit { text: root.details-notes; read-only: true; height: 92px; placeholder-text: "未填写"; accessible-label: "详情备注"; }
                             }
                         }
                     }
@@ -1762,15 +1963,20 @@ export component AppWindow inherits Window {
 
     // ==================== 13. CUSTOM WINDOW CAPTION CONTROLS ====================
     if root.compact: WindowControl {
-        kind: 2; x: parent.width - self.width - 8px; y: 12px;
+        kind: 2; x: parent.width - self.width - 8px; y: root.unlocked && !root.verification-active ? 8px : 12px;
+        resting-background: root.accounts-visible ? root.wallpaper-caption-fill : transparent;
         label: "关闭悬浮框"; clicked => { root.cancel(); }
     }
-    if !root.compact: HorizontalLayout {
+    if !root.compact: Rectangle {
         x: parent.width - self.width - 8px; y: 16px; width: root.unlocked && !root.fixed-page ? 108px : 72px; height: 30px;
-        spacing: 0px;
-        WindowControl { kind: 0; label: "最小化窗口"; enabled: !root.discard-open; clicked => { root.minimize-window(); } }
-        if root.unlocked && !root.fixed-page: WindowControl { kind: 1; maximized: root.is-maximized; nc-hovered: root.max-hovered; label: "最大化或还原窗口"; enabled: !root.discard-open; clicked => { root.maximize-window(); } }
-        WindowControl { kind: 2; label: "关闭窗口"; enabled: !root.working && !root.discard-open; clicked => { root.cancel(); } }
+        border-radius: 6px;
+        background: root.accounts-visible ? root.wallpaper-caption-fill : transparent;
+        HorizontalLayout {
+            spacing: 0px;
+            WindowControl { kind: 0; label: "最小化窗口"; enabled: !root.discard-open; clicked => { root.minimize-window(); } }
+            if root.unlocked && !root.fixed-page: WindowControl { kind: 1; maximized: root.is-maximized; nc-hovered: root.max-hovered; label: "最大化或还原窗口"; enabled: !root.discard-open; clicked => { root.maximize-window(); } }
+            WindowControl { kind: 2; label: "关闭窗口"; enabled: !root.working && !root.discard-open; clicked => { root.cancel(); } }
+        }
     }
     if root.app-menu-open: Rectangle {
         width: parent.width; height: parent.height;
@@ -1778,7 +1984,7 @@ export component AppWindow inherits Window {
     }
     app-menu := FocusScope {
         visible: root.app-menu-open;
-        x: root.width - 196px; y: root.height - 196px; width: 180px; height: 108px;
+        x: root.app-menu-right - self.width; y: root.app-menu-top - self.height - 6px; width: 180px; height: 108px;
         key-pressed(event) => {
             if (event.text == Key.Escape) { root.app-menu-open = false; root.focus-search(); return accept; }
             if (event.text == Key.Tab || event.text == Key.DownArrow || event.text == Key.UpArrow) { root.app-menu-index = Math.mod(root.app-menu-index + (event.text == Key.UpArrow ? 2 : 1),3); return accept; }
@@ -1786,7 +1992,7 @@ export component AppWindow inherits Window {
             return reject;
         }
         Surface {
-            border-radius: 8px;
+            border-radius: 8px; border-color: Theme.window-line;
             VerticalLayout {
                 padding: 4px; spacing: 2px;
                 Button { text: "收起到托盘"; menu: true; selected: root.app-menu-index == 0; entered => { root.app-menu-index = 0; } clicked => { root.app-menu-open = false; root.cancel(); } }

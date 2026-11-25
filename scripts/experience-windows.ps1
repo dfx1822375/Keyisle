@@ -19,6 +19,12 @@ function Pause([int]$ms=300){$watch=[Diagnostics.Stopwatch]::StartNew();while($w
 function Capture([string]$name,$root=(Main)){$r=$root.Current.BoundingRectangle;$b=[Drawing.Bitmap]::new([int]$r.Width,[int]$r.Height);$g=[Drawing.Graphics]::FromImage($b);try{$g.CopyFromScreen([int]$r.X,[int]$r.Y,0,0,$b.Size);$b.Save((Join-Path $DataDir $name),[Drawing.Imaging.ImageFormat]::Png)}finally{$g.Dispose();$b.Dispose()}}
 function Pixel([int]$x,[int]$y){$dc=[ExperienceNative]::GetDC([IntPtr]::Zero);try{return [ExperienceNative]::GetPixel($dc,$x,$y)}finally{[ExperienceNative]::ReleaseDC([IntPtr]::Zero,$dc)|Out-Null}}
 function Red([uint32]$color){return ($color -band 255)}
+function FocusAccent($inputControl) {
+ $inputControl.SetFocus();Pause 220
+ $bounds=$inputControl.Current.BoundingRectangle
+ $bgr=Pixel ([int]($bounds.Left+40)) ([int]($bounds.Bottom-2))
+ return [Drawing.Color]::FromArgb(($bgr -band 255),(($bgr -shr 8) -band 255),(($bgr -shr 16) -band 255))
+}
 function Canvas($root=(Main)){$r=$root.Current.BoundingRectangle;$s=[ExperienceNative]::GetDpiForWindow([IntPtr]$root.Current.NativeWindowHandle)/96.0;return Pixel ([int]($r.Left+8*$s)) ([int]($r.Top+100*$s))}
 function Combo([string]$name,[int]$index){$items=@(Visible (Main) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::ComboBox)|Where-Object{$_.Current.Name -eq $name});Assert ($items.Count -eq 1) "Combo missing: $name";$items[0].SetFocus();[VaultTestNative]::SetForegroundWindow([IntPtr](Main).Current.NativeWindowHandle)|Out-Null;[Windows.Forms.SendKeys]::SendWait('{UP}{UP}{UP}{UP}');for($i=0;$i -lt $index;$i++){[Windows.Forms.SendKeys]::SendWait('{DOWN}')};Pause 150}
 function Popup{$condition=[Windows.Automation.AndCondition]::new([Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$script:process.Id),[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'Keyisle · 快速填充'));$r=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition);Assert ($null -ne $r) 'Popup missing';return $r}
@@ -49,8 +55,25 @@ try{
  $light=Canvas;Assert ((Red $light) -gt 230 -and $light -ne 0xffffff) 'Light canvas did not use the soft off-white surface'
  $r=(Main).Current.BoundingRectangle;$edge=Pixel ([int]($r.Left+1)) ([int]($r.Top+$r.Height/2));Assert ([Math]::Abs((Red $edge)-(Red $light)) -gt 15) 'Window outline is not distinguishable on a white desktop'
  Capture '03-settings-light.png'
+ for ($scheme=0;$scheme -lt 4;$scheme++) {
+  Combo '外观配色' $scheme;Button '保存设置';Button '返回账号列表'
+  $searchInput=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '搜索账号')[0]
+  $accent=FocusAccent $searchInput
+  $hue=$accent.GetHue()
+  $matchesTheme=switch ($scheme) {
+   0 {$hue -ge 135 -and $hue -le 195 -and $accent.GetSaturation() -gt 0.25}
+   1 {$hue -ge 196 -and $hue -le 245 -and $accent.GetSaturation() -gt 0.25}
+   2 {$hue -ge 246 -and $hue -le 295 -and $accent.GetSaturation() -gt 0.25}
+   3 {$accent.GetSaturation() -lt 0.3 -and $accent.GetBrightness() -lt 0.6}
+  }
+  Assert $matchesTheme "Fluent focus accent did not match scheme $scheme ($accent)"
+  Button '设置'
+ }
+ Write-Output 'PASS: Fluent focus accents follow all four application color schemes.'
  Combo '外观模式' 2;Combo '外观配色' 1;Button '保存设置';Assert ((Red (Canvas)) -lt 80) 'Dark page canvas not applied';Capture '04-settings-dark.png';Button '返回账号列表'
- $search=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '搜索账号')[0].Current.BoundingRectangle
+ $searchInput=@(Visible (Main) ([Windows.Automation.AutomationElement]::NameProperty) '搜索账号')[0]
+ $search=$searchInput.Current.BoundingRectangle
+ $darkAccent=FocusAccent $searchInput
  Assert ((Red (Pixel ([int]($search.Left+40)) ([int]($search.Top+6)))) -lt 110) 'Native input stayed white in dark mode'
  Capture '05-main-dark.png'
  Button '收起';$receiver.Show();$receiver.Activate();$receiverEdit.Focus()|Out-Null;[VaultTestNative]::SetForegroundWindow($receiver.Handle)|Out-Null
@@ -65,7 +88,9 @@ try{
  $location.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke();Pause 250
  $texts=@(Visible (Popup) ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Text)|ForEach-Object{$_.Current.Name})
  Assert (@($texts|Where-Object{$_ -match '(输入光标位置|呼出时鼠标) \(-?\d+, -?\d+\)'}).Count -gt 0) 'Location detail omitted captured input/callout coordinates'
- $edit=@(Visible $pop ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit))[0];$edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('youxiang');$edit.SetFocus();Pause 250;Capture '06-popup-dark-target.png' (Popup)
+ $edit=@(Visible $pop ([Windows.Automation.AutomationElement]::ControlTypeProperty) ([Windows.Automation.ControlType]::Edit))[0];$edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('youxiang')
+ Assert ((FocusAccent $edit).ToArgb() -eq $darkAccent.ToArgb()) 'Popup had a different Fluent accent from the main window'
+ Capture '06-popup-dark-target.png' (Popup)
  $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue('空用户名回归');$edit.SetFocus();Pause 250
  $popupBefore=(Popup).Current.BoundingRectangle
  SendTestKeys '^{ENTER}';Pause 650
